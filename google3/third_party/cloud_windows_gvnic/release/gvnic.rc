@@ -1,0 +1,36 @@
+/*
+    Internal resource file for driver.
+*/
+
+#include <windows.h>
+#include <ntverp.h>
+
+#define VER_FILETYPE                VFT_DRV
+#define VER_FILESUBTYPE             VFT2_DRV_SYSTEM
+#define VER_FILEDESCRIPTION_STR     "Google Virtual Miniport Driver"
+#define VER_INTERNALNAME_STR        "gvnic.sys"
+#define VER_ORIGINALFILENAME_STR    "gvnic.sys"
+
+#undef  VER_PRODUCTBUILD
+#undef  VER_PRODUCTBUILD_QFE
+#undef  VER_PRODUCTMAJORVERSION
+#undef  VER_PRODUCTMINORVERSION
+
+#define VER_LANGNEUTRAL
+
+#define VER_PRODUCTBUILD            RELEASE_VERSION
+#define VER_PRODUCTBUILD_QFE        RELEASE_VERSION_QEF
+#define VER_PRODUCTMAJORVERSION     MAJOR_DRIVER_VERSION
+#define VER_PRODUCTMINORVERSION     MINOR_DRIVER_VERSION
+
+#define VER_LEGALCOPYRIGHT_STR      "Copyright (C) 2017 Google Inc"
+#ifdef VER_COMPANYNAME_STR
+#undef VER_COMPANYNAME_STR
+#define VER_COMPANYNAME_STR         "Google Inc"
+#endif
+
+#undef VER_PRODUCTNAME_STR
+#define VER_PRODUCTNAME_STR         "Google Virtual Network Adapter"
+
+#include "common.ver"
+
