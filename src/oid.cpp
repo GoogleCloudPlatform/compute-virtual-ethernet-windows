@@ -321,7 +321,6 @@ NDIS_STATUS HandleOidSet(AdapterContext* context,
       // Notifies a miniport driver that its underlying network adapter will be
       // transitioning to the device power state specified in the
       // InformationBuffer.
-      // TODO(b/76420935)
       status = NDIS_STATUS_NOT_ACCEPTED;
       break;
     }
