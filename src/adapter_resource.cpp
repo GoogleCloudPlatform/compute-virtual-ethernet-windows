@@ -68,8 +68,8 @@ NDIS_STATUS AdapterResources::Initialize(NDIS_HANDLE driver_handle,
         KAFFINITY msi_affinity = ndis_resource_list->PartialDescriptors[i]
                                      .u.MessageInterrupt.Translated.Affinity;
         DEBUGP(GVNIC_INFO,
-               "[%s] Found Interrupt vector %d, level %d, affinity %#X",
-               __FUNCTION__, msi_vector, msi_level, (ULONG)msi_affinity);
+               "[%s] Found Interrupt vector %d, level %d, affinity %#llX",
+               __FUNCTION__, msi_vector, msi_level, msi_affinity);
       } else {
         DEBUGP(GVNIC_INFO, "[%s] Ignore line-based interrupt.", __FUNCTION__);
       }

@@ -37,7 +37,8 @@ class RSSConfiguration final {
         hash_func_(0),
         hash_type_(0),
         base_cpu_number_(0),
-        indirection_table_entry_count_(0) {}
+        indirection_table_entry_count_(0),
+        scale_factor_(1) {}
   ~RSSConfiguration() = default;
 
   // Default copy and assignment.
@@ -47,7 +48,9 @@ class RSSConfiguration final {
   // Init rss settings.
   // Params:
   //  is_supported - whether rss is configured as supported.
-  void Init(bool is_supported);
+  //  num_rx_slices - number of rx slices. Used to set scale factor for RSS
+  //    vcpu to slice mapping
+  void Init(bool is_supported, UINT num_rx_slices);
 
   // Reset all configurations back to default.
   void Reset();
@@ -69,8 +72,8 @@ class RSSConfiguration final {
   UINT16 indirection_table_size() const {
     return indirection_table_entry_count_;
   }
-  const PROCESSOR_NUMBER* indirection_table() const {
-    return indirection_table_;
+  ULONG GetIndirectionTableEntry(int index) const {
+    return indirection_table_[index].Number / scale_factor_;
   }
 
   // Helper function to log all settings.
@@ -105,6 +108,11 @@ class RSSConfiguration final {
   UINT16 indirection_table_entry_count_;
   // Indirection table, mapping of hash_value -> PROCESSOR_NUMBER
   PROCESSOR_NUMBER indirection_table_[kMaxIndirectionTableSize];
+
+  // 1 : slice number 1:1 mapping to vCPU
+  // 2 : slice number 1:2 mapping to vCPU, this will skip SMT and fit RSS
+  // scenario.
+  UINT scale_factor_;
 };
 
 #endif  // RSS_CONFIGURATION_H_

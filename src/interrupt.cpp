@@ -169,7 +169,6 @@ VOID MiniportMSIInterruptDpc(_In_ PVOID miniport_interrupt_context,
       for (UINT i = 0; i < num_rx_rings && packet_assembler.CanAllocateNBL();
            i++) {
         RxRing* rx_ring = notify_manager->GetRxRing(message_id, i);
-        NT_ASSERT(GetCurrentProcessorIndex() == rx_ring->slice());
         all_packet_processed = all_packet_processed &&
                                rx_ring->ProcessPendingPackets(
                                    /*is_dpc_level=*/true, &packet_assembler);

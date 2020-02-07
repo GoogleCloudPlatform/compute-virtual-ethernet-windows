@@ -55,9 +55,13 @@ RSSConfiguration::GetCapabilities(UINT32 num_msi_vectors, UINT32 num_rx_queue) {
   return capabilities;
 }
 
-void RSSConfiguration::Init(bool is_supported) {
+void RSSConfiguration::Init(bool is_supported, UINT num_rx_slices) {
   Reset();
   is_supported_ = is_supported;
+  UINT processor_count = GetSystemProcessorCount();
+  if (processor_count >= 2 * num_rx_slices) {
+    scale_factor_ = 2;
+  }
 }
 
 void RSSConfiguration::Reset() {
@@ -66,6 +70,7 @@ void RSSConfiguration::Reset() {
   hash_type_ = 0;
   base_cpu_number_ = 0;
   indirection_table_entry_count_ = 0;
+  scale_factor_ = 1;
   NdisZeroMemory(hash_secret_key_, kHashKeySize * sizeof(UINT8));
   NdisZeroMemory(indirection_table_,
                  kMaxIndirectionTableSize * sizeof(PROCESSOR_NUMBER));
@@ -199,6 +204,7 @@ void RSSConfiguration::DumpSettings() {
   DEBUGP(GVNIC_INFO, "[%s] base_cpu_num: %d", __FUNCTION__, base_cpu_number_);
   DEBUGP(GVNIC_INFO, "[%s] hash_type: %#x", __FUNCTION__, hash_type_);
   DEBUGP(GVNIC_INFO, "[%s] hash_function: %#x", __FUNCTION__, hash_func_);
+  DEBUGP(GVNIC_INFO, "[%s] scale_factor: %#x", __FUNCTION__, scale_factor_);
 
   DEBUGP(GVNIC_INFO, "[%s] indirection_table_len : %u", __FUNCTION__,
          indirection_table_entry_count_);

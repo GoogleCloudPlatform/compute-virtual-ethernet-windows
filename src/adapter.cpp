@@ -342,7 +342,8 @@ UINT GetMsiVectorCount(const IO_RESOURCE_REQUIREMENTS_LIST& resource_list) {
     for (UINT j = 0; j < io_resource_list->Count; ++j) {
       const IO_RESOURCE_DESCRIPTOR& desc = io_resource_list->Descriptors[j];
       if (desc.Type == CmResourceTypeInterrupt &&
-          (desc.Flags & CM_RESOURCE_INTERRUPT_MESSAGE)) {
+          (desc.Flags & CM_RESOURCE_INTERRUPT_MESSAGE) &&
+          (desc.Flags & CM_RESOURCE_INTERRUPT_POLICY_INCLUDED)) {
         msi_count++;
       }
     }
@@ -358,25 +359,42 @@ UINT GetMsiVectorCount(const IO_RESOURCE_REQUIREMENTS_LIST& resource_list) {
 }
 
 // Set target processor for msi vectors.
-void SetMsiAffinity(UINT num_tx, UINT num_rx,
+//
+// Arguments:
+//  num_tx: number of tx queue.
+//  num_rx: number of rx queue.
+//  rx_scale_factor: the internal between two interrupt target processor.
+//  resource_list: resource list contain msi vectors.
+void SetMsiAffinity(UINT num_tx, UINT num_rx, UINT rx_scale_factor,
                     IO_RESOURCE_REQUIREMENTS_LIST* resource_list) {
   UINT num_tx_configured = 0;
   UINT num_rx_configured = 0;
 
+  // The following logic tries to optimize for a most common scenario:
+  //  - num_rx == number_processor / 2
+  //  - RSS is turned on
+  // In this case, since RSS will skip hyperthreading cpus, we distrubute
+  // interrupts with the follows:
+  // +--------+--------+--------+--------+-----+
+  // | vCPU_1 | vCPU_2 | vCPU_3 | vCPU_4 | ... |
+  // | rx_0   | X      | rx_1   | X      | ... |
+  // +--------+--------+--------+--------+-----+
   IO_RESOURCE_LIST* io_resource_list = resource_list->List;
 
   for (UINT i = 0; i < resource_list->AlternativeLists; ++i) {
     for (UINT j = 0; j < io_resource_list->Count; ++j) {
       IO_RESOURCE_DESCRIPTOR* desc = &io_resource_list->Descriptors[j];
       if (desc->Type == CmResourceTypeInterrupt &&
-          (desc->Flags & CM_RESOURCE_INTERRUPT_MESSAGE)) {
+          (desc->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) &&
+          (desc->Flags & CM_RESOURCE_INTERRUPT_POLICY_INCLUDED)) {
         if (num_tx_configured < num_tx) {
           desc->u.Interrupt.AffinityPolicy = IrqPolicySpecifiedProcessors;
           desc->u.Interrupt.TargetedProcessors = (1ull << num_tx_configured);
           num_tx_configured++;
         } else if (num_rx_configured < num_rx) {
           desc->u.Interrupt.AffinityPolicy = IrqPolicySpecifiedProcessors;
-          desc->u.Interrupt.TargetedProcessors = (1ull << num_rx_configured);
+          desc->u.Interrupt.TargetedProcessors =
+              (1ull << (num_rx_configured * rx_scale_factor));
           num_rx_configured++;
         }
       }
@@ -635,6 +653,8 @@ _Use_decl_annotations_ NDIS_STATUS GvnicFilterResource(
   // Reserve one msi for management queue.
   UINT msi_for_transmission = num_msi - 1;
 
+  UINT rx_scale_factor = 1;
+
   // Expect one tx and rx per processor and one mgt queue.
   // If get less, adjust num_tx and num_rx
   if (msi_for_transmission < 2 * processor_count) {
@@ -642,9 +662,15 @@ _Use_decl_annotations_ NDIS_STATUS GvnicFilterResource(
     // between tx and rx. If the number is odd, give the extra to rx.
     num_tx = msi_for_transmission / 2;
     num_rx = msi_for_transmission - num_tx;
+
+    // If we have num_rx < half of processor count, we can skip the SMT vCPU'
+    // since Windows will not use them any way.
+    if (num_rx <= (processor_count / 2)) {
+      rx_scale_factor = 2;
+    }
   }
 
-  SetMsiAffinity(num_tx, num_rx, resource_list);
+  SetMsiAffinity(num_tx, num_rx, rx_scale_factor, resource_list);
   irp->IoStatus.Status = STATUS_SUCCESS;
 
   DEBUGP(GVNIC_VERBOSE, "<--- GvnicFilterResource");

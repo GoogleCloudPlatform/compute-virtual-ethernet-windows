@@ -73,7 +73,6 @@ NDIS_STATUS GvnicPciDevice::Init(AdapterResources* resources,
   NdisAllocateSpinLock(&rx_checksum_enabled_spin_lock_);
   NdisAllocateSpinLock(&eth_header_len_spin_lock_);
   NdisAllocateSpinLock(&rss_config_spin_lock_);
-  rss_config_.Init(configuration.is_rss_enabled());
   UpdateRxChecksumSetting(false);
   UpdateTxPacketHeaderLength({kEthAddrLen, kEthAddrLen});
 
@@ -88,6 +87,7 @@ NDIS_STATUS GvnicPciDevice::Init(AdapterResources* resources,
     status = ConfigureDeviceResource();
   }
 
+  rss_config_.Init(configuration.is_rss_enabled(), rx_config_.num_slices);
   DEBUGP(GVNIC_VERBOSE, "<--- GvnicPciDevice::Initialize status 0x%08x\n",
          status);
   return status;

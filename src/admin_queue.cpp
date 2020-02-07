@@ -387,7 +387,7 @@ NDIS_STATUS AdminQueue::SetRssParameters(const RSSConfiguration& rss_config) {
     UINT32* device_indirection_table = dma_indirection_table.virtual_address();
     for (UINT i = 0; i < rss_config.indirection_table_size(); i++) {
       device_indirection_table[i] =
-          RtlUlongByteSwap(rss_config.indirection_table()[i].Number);
+          RtlUlongByteSwap(rss_config.GetIndirectionTableEntry(i));
     }
     indirection_table_physical_addr =
         dma_indirection_table.physical_address().QuadPart;
