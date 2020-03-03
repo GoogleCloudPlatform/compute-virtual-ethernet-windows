@@ -234,14 +234,14 @@ void GvnicPciDevice::SetTransmitQueueConfig() {
 
   tx_config_.max_traffic_class =
       min(device_params_.max_tx_queues, kMaxTxTrafficClass);
-  tx_config_.max_slices = min(device_params_.descriptor.default_num_slices,
-                              static_cast<int>(GetSystemProcessorCount()));
+  tx_config_.max_slices = static_cast<int>(GetSystemProcessorCount());
   tx_config_.array_size = tx_config_.max_traffic_class * tx_config_.max_slices;
   tx_config_.max_queues =
       min(tx_config_.array_size, device_params_.max_tx_queues);
 
   tx_config_.num_queues = tx_config_.max_queues;
-  tx_config_.num_slices = tx_config_.max_slices;
+  tx_config_.num_slices =
+      min(device_params_.descriptor.default_num_slices, tx_config_.max_slices);
   tx_config_.num_traffic_class = kDefaultTxTrafficClassCount;
   tx_config_.num_descriptors = device_params_.descriptor.tx_queue_size;
   tx_config_.pages_per_queue_page_list =
@@ -317,17 +317,16 @@ void GvnicPciDevice::SendNetBufferLists(PNET_BUFFER_LIST net_buffer_list,
   ULONG proc_index = GetCurrentProcessorIndex();
 
   while (net_buffer_list) {
-    NDIS_NET_BUFFER_LIST_8021Q_INFO qos_info;
-    qos_info.Value =
-        NET_BUFFER_LIST_INFO(net_buffer_list, Ieee8021QNetBufferListInfo);
+    // No plan to use tx traffic class now.
+    // NDIS_NET_BUFFER_LIST_8021Q_INFO qos_info;
+    // qos_info.Value =
+    //     NET_BUFFER_LIST_INFO(net_buffer_list, Ieee8021QNetBufferListInfo);
 
-    // For alpha, we only use traffic class 0 and user should not be able to
-    // change it.
-    NT_ASSERT(qos_info.TagHeader.UserPriority == 0);
-    UINT32 traffic_class =
-        ignore_flow_table_ ? 0 : qos_info.TagHeader.UserPriority;
+    // NT_ASSERT(qos_info.TagHeader.UserPriority == 0);
+    // UINT32 traffic_class =
+    //     ignore_flow_table_ ? 0 : qos_info.TagHeader.UserPriority;
 
-    TxRing* tx_ring = GetTxRing(proc_index, traffic_class);
+    TxRing* tx_ring = GetTxRing(proc_index, /*traffic_class=*/0);
     NT_ASSERT(tx_ring->is_init());
 
     NET_BUFFER_LIST* next_net_buffer_list =
@@ -729,17 +728,17 @@ void GvnicPciDevice::SetSliceTrafficClassToTxRingMapping() {
   NT_ASSERT(slice_tc_to_tx_ring_map_ != nullptr);
 
   // Step 1. Fully populate traffic_class_0.
-  UINT32 valid_rx_ring_count = 0;
-  UINT32 valid_rx_ring_pointer = 0;
+  UINT32 valid_tx_ring_count = 0;
+  UINT32 valid_tx_ring_pointer = 0;
   for (UINT32 i = 0; i < tx_config_.max_slices; i++) {
     if (tx_rings_[i].is_init()) {
-      valid_rx_ring_count++;
+      valid_tx_ring_count++;
     } else {
-      if (valid_rx_ring_pointer == valid_rx_ring_count) {
-        valid_rx_ring_pointer = 0;
+      if (valid_tx_ring_pointer == valid_tx_ring_count) {
+        valid_tx_ring_pointer = 0;
       }
     }
-    slice_tc_to_tx_ring_map_[i] = valid_rx_ring_pointer++;
+    slice_tc_to_tx_ring_map_[i] = valid_tx_ring_pointer++;
   }
 
   // Step 2. Populate the rest of the traffic class.
