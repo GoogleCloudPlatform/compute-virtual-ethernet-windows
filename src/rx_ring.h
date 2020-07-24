@@ -123,6 +123,10 @@ __declspec(align(kCacheLineSize)) class RxRing final : public RingBase {
 // NET_BUFFER_LIST.
 inline void IncreaseRxDataRingPendingCount(RxRingEntry* rx_ring_entry,
                                            NET_BUFFER_LIST* net_buffer_list) {
+  NT_ASSERT(rx_ring_entry->pending_count == 0);
+  NT_ASSERT(rx_ring_entry->rsc_next == nullptr);
+  NT_ASSERT(rx_ring_entry->rsc_last == nullptr);
+
   InterlockedIncrement16(&rx_ring_entry->pending_count);
   auto current_rx_ring_entry = reinterpret_cast<RxRingEntry*>(
       net_buffer_list->MiniportReserved[kNetBufferListRxRingEntryPtrIdx]);
@@ -150,9 +154,12 @@ inline void DecreaseRxDataRingPendingCount(NET_BUFFER_LIST* net_buffer_list) {
 
   while (rx_ring_entry != nullptr) {
     RxRingEntry* next_entry = rx_ring_entry->rsc_next;
-    InterlockedDecrement16(&rx_ring_entry->pending_count);
     rx_ring_entry->rsc_last = nullptr;
     rx_ring_entry->rsc_next = nullptr;
+
+    // This ring entry can be re-used for asynchronous transfer immediately
+    // after InterlockedDecrement16 returns.
+    InterlockedDecrement16(&rx_ring_entry->pending_count);
     rx_ring_entry = next_entry;
   }
 }
