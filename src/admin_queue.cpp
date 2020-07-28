@@ -114,8 +114,6 @@ NDIS_STATUS AdminQueue::DescribeDevice(DeviceDescriptor* descriptor) {
   descriptor->event_counters = RtlUshortByteSwap(gvnic_desc->event_counters);
   descriptor->tx_pages_per_qpl =
       RtlUshortByteSwap(gvnic_desc->tx_pages_per_qpl);
-  descriptor->rx_pages_per_qpl =
-      RtlUshortByteSwap(gvnic_desc->rx_pages_per_qpl);
   NdisMoveMemory(descriptor->mac, gvnic_desc->mac, sizeof(descriptor->mac));
 
   DEBUGP(GVNIC_INFO,

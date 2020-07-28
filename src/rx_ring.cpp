@@ -91,8 +91,8 @@ bool RxRing::Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
   rss_hash_type_ = 0;
   NdisAllocateSpinLock(&seq_counter_spin_lock_);
 
-  // The current implementation assume we have at least one descriptor per page.
-  NT_ASSERT(num_descriptor_ <= queue_page_list->num_pages());
+  // The current implementation requires that we have one descriptor per page.
+  NT_ASSERT(num_descriptor_ == queue_page_list->num_pages());
 
   DEBUGP(GVNIC_INFO, "[%s] Allocating resource for rx: %u with %u slots",
          __FUNCTION__, id, num_descriptor_);

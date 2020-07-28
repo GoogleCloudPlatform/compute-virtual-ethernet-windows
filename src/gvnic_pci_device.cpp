@@ -30,8 +30,6 @@
 
 namespace {
 constexpr UINT kMaxTxTrafficClass = 8;
-constexpr UINT kTxQueuePageListMaxPages = 512;
-constexpr UINT kRxQueuePageListMaxPages = 1024;
 constexpr UINT kMaxVersionLength = 1024;  // Device accept max 1024
 constexpr char kVersionPrefix[] = "NDIS-";
 
@@ -245,7 +243,7 @@ void GvnicPciDevice::SetTransmitQueueConfig() {
   tx_config_.num_traffic_class = kDefaultTxTrafficClassCount;
   tx_config_.num_descriptors = device_params_.descriptor.tx_queue_size;
   tx_config_.pages_per_queue_page_list =
-      min(kTxQueuePageListMaxPages, device_params_.descriptor.tx_pages_per_qpl);
+      device_params_.descriptor.tx_pages_per_qpl;
 
   DEBUGP(GVNIC_INFO,
          "[%s] TX slices %d, max slices %d, tcs %d, max tcs %d, array size %d, "
@@ -270,7 +268,11 @@ void GvnicPciDevice::SetTransmitQueueConfig() {
   rx_config_.num_slices = rx_config_.max_slices;
   rx_config_.num_descriptors = device_params_.descriptor.rx_queue_size;
   rx_config_.pages_per_queue_page_list =
-      min(kRxQueuePageListMaxPages, device_params_.descriptor.rx_pages_per_qpl);
+      device_params_.descriptor.rx_queue_size;
+
+  // Pages per QPL must match the queue size for rx as each descriptor uses
+  // a single page.
+  NT_ASSERT(rx_config_.pages_per_queue_page_list == rx_config_.num_descriptors);
 
   DEBUGP(GVNIC_INFO,
          "[%s] RX slices %d, max slices %d, tcs %d, max tcs %d, array size %d, "
@@ -511,8 +513,6 @@ bool GvnicPciDevice::InitTxRings() {
 
 bool GvnicPciDevice::InitRxRings() {
   PAGED_CODE();
-  // Rx_ring expects we have same number of descriptors and pages.
-  NT_ASSERT(rx_config_.num_descriptors == rx_config_.pages_per_queue_page_list);
 
   UINT rx_ring_count = 0;
   for (UINT tc = 0; tc < rx_config_.num_traffic_class; tc++) {

@@ -186,12 +186,12 @@ struct DeviceDescriptor {
   UINT16 mtu;
   UINT16 event_counters;
   UINT16 tx_pages_per_qpl;
-  UINT16 rx_pages_per_qpl;
+  UINT16 reserved1;
   UINT8 mac[kEthAddrLen];
   UINT16 num_device_options;
   UINT16 total_length;
 
-  UINT8 reserved[6];
+  UINT8 reserved2[6];
 };
 
 struct DeviceOption {
