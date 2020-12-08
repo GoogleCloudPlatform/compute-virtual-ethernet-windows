@@ -21,7 +21,6 @@
 #include <ndis.h>
 
 #include "adapter_configuration.h"  // NOLINT: include directory
-#include "netutils.h"               // NOLINT: include directory
 
 #if NDIS_SUPPORT_NDIS630
 #define SUPPORT_RSC
@@ -71,4 +70,5 @@ NDIS_STATUS UpdateOffloadConfigFromOffloadParameters(
     NDIS_OFFLOAD* offload_config);
 
 void LogOffloadSetting(const char* message, const NDIS_OFFLOAD& offload);
+
 #endif  // OFFLOAD_CONFIG_H_

@@ -44,7 +44,8 @@ class AdminQueue final {
 
   // Call DescribeDevice abi to gVNIC device and save the return device
   // descriptor into descriptor param.
-  NDIS_STATUS DescribeDevice(DeviceDescriptor* descriptor);
+  NDIS_STATUS DescribeDevice(DeviceDescriptor* descriptor,
+                             bool* support_raw_addressing);
 
   // Call ConfigureDeviceResource abi to gVnic with following params:
   // - counter_array_addr: physical address of allocated counter array.
@@ -86,10 +87,8 @@ class AdminQueue final {
   // Pass RSS configuration to device.
   NDIS_STATUS SetRssParameters(const RSSConfiguration& rss_config);
 
+  // Resets the device and releases the command queue.
   void Release();
-
-  // Write 0x0 to ADMIN_QUEUE_PFN to cause a reset on the device.
-  void Reset();
 
  private:
   // Allocate a AdminCommand object from command_ring_.
@@ -106,6 +105,9 @@ class AdminQueue final {
   // commands_completed_ will be updated with the value read from device.
   // Return false if timeout and true otherwise.
   bool WaitForCommand(UINT32 command_id);
+
+  // Write 0x0 to ADMIN_QUEUE_PFN to cause a reset on the device.
+  void Reset();
 
   AdapterResources* resources_;
 

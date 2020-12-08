@@ -137,17 +137,17 @@ bool ValidateOffloadConfig(const NDIS_OFFLOAD& config,
   }
 
   if (capability.LsoV1.IPv4.Encapsulation == NDIS_ENCAPSULATION_NOT_SUPPORTED &&
-      config.LsoV1.IPv4.Encapsulation != NDIS_ENCAPSULATION_IEEE_802_3) {
+      config.LsoV1.IPv4.Encapsulation != NDIS_ENCAPSULATION_NOT_SUPPORTED) {
     return false;
   }
 
   if (capability.LsoV2.IPv4.Encapsulation == NDIS_ENCAPSULATION_NOT_SUPPORTED &&
-      config.LsoV2.IPv4.Encapsulation != NDIS_ENCAPSULATION_IEEE_802_3) {
+      config.LsoV2.IPv4.Encapsulation != NDIS_ENCAPSULATION_NOT_SUPPORTED) {
     return false;
   }
 
   if (capability.LsoV2.IPv6.Encapsulation == NDIS_ENCAPSULATION_NOT_SUPPORTED &&
-      config.LsoV2.IPv6.Encapsulation != NDIS_ENCAPSULATION_IEEE_802_3) {
+      config.LsoV2.IPv6.Encapsulation != NDIS_ENCAPSULATION_NOT_SUPPORTED) {
     return false;
   }
 

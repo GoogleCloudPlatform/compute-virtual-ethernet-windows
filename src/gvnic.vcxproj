@@ -232,6 +232,8 @@
     <ClCompile Include="rx_ring.cpp" />
     <ClCompile Include="tx_net_buffer.cpp" />
     <ClCompile Include="tx_ring.cpp" />
+    <ClCompile Include="tx_ring_dma.cpp" />
+    <ClCompile Include="tx_ring_qpl.cpp" />
     <OtherWpp Include="shared_memory.h">
       <WppEnabled>true</WppEnabled>
       <WppKernelMode>true</WppKernelMode>
@@ -441,6 +443,8 @@
     <ClInclude Include="tx_net_buffer.h" />
     <ClInclude Include="tx_net_buffer_list.h" />
     <ClInclude Include="tx_ring.h" />
+    <ClInclude Include="tx_ring_dma.h" />
+    <ClInclude Include="tx_ring_qpl.h" />
     <ClInclude Include="utils.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

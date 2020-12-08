@@ -43,10 +43,15 @@ __declspec(align(kCacheLineSize)) class RxPacket final {
   void SetRssInfo(UINT32 rss_hash_value, UINT32 rss_hash_type,
                   UINT8 rss_hash_func);
 
-  // Calculate the correct rss hash value for verification.
 #ifdef DBG
+  // Calculate the correct rss hash value for verification.
   UINT32 CalculateRss(UINT32 rss_hash_type);
   void SetSecretKey(const UINT8* rss_secret_key);
+
+  // Verifies that the packet is processed on the correct RSS processor.
+  void SetIndirectionTable(UINT16 indirection_table_entry_count,
+                           const PROCESSOR_NUMBER* indirection_table);
+  ULONG GetExpectedRSSProcessor(UINT32 rss_hash_value);
 #endif
 
   ETH_HEADER* eth_header() const { return eth_header_; }
@@ -108,6 +113,8 @@ __declspec(align(kCacheLineSize)) class RxPacket final {
 
 #ifdef DBG
   const UINT8* secret_key_;
+  const PROCESSOR_NUMBER* indirection_table_;
+  UINT16 indirection_table_entry_count_;
 #endif
 
   // Return TCP/UDP validation checksum.

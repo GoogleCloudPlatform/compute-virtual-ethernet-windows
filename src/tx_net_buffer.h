@@ -70,8 +70,8 @@ class TxNetBuffer final {
   const NET_BUFFER* net_buffer_;
   int data_length_;
   ETH_HEADER* eth_header_;
-  NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO checksum_info_;
   bool is_checksum_offload_;
+  NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO checksum_info_;
   NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO lso_info_;
   bool is_lso_;
 

@@ -29,7 +29,7 @@ struct ConfigurationEntry {
 // Class for reading registry configuration.
 class AdapterConfiguration final {
  public:
-  AdapterConfiguration() = default;
+  AdapterConfiguration() : is_mac_configured_(false) {}
   ~AdapterConfiguration() = default;
 
   // Not copyable or movable
@@ -56,6 +56,7 @@ class AdapterConfiguration final {
   bool is_rss_enabled() const { return rss_.value == 1; }
   bool is_rsc_ipv4_enabled() const { return rsc_ipv4_.value == 1; }
   bool is_rsc_ipv6_enabled() const { return rsc_ipv6_.value == 1; }
+  bool allow_raw_addressing() const { return allow_raw_addressing_.value == 1; }
   UINT32 num_tx_queue() const { return num_tx_queue_.value; }
   UINT32 num_rx_queue() const { return num_rx_queue_.value; }
 
@@ -75,6 +76,7 @@ class AdapterConfiguration final {
   ConfigurationEntry rss_;
   ConfigurationEntry rsc_ipv4_;
   ConfigurationEntry rsc_ipv6_;
+  ConfigurationEntry allow_raw_addressing_;
 
   bool is_mac_configured_;
   UCHAR mac_[kEthAddrLen];

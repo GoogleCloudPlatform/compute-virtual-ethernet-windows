@@ -43,11 +43,15 @@ __declspec(align(kCacheLineSize)) class AdapterStatistics final {
       statistics_info_.ifHCOutBroadcastPkts;
   }
 
+  UINT64 GetTransmitErrorCount() const { return statistics_info_.ifOutErrors; }
+
   UINT64 GetReceivePacketCount() const {
     return statistics_info_.ifHCInUcastPkts +
       statistics_info_.ifHCInMulticastPkts +
       statistics_info_.ifHCInBroadcastPkts;
   }
+
+  UINT64 GetReceiveErrorCount() const { return statistics_info_.ifInErrors; }
 
   void AddSentPacket(UINT byte_send, const ETH_HEADER* eth_header);
 

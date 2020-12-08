@@ -29,11 +29,11 @@ constexpr int kRxChecksumOffloadEnabled = 1 << 1;
 // This is a wrapper function of NdisInitializeString, which requests a
 // non-constant UCHAR* as input. According to function doc, it won't change
 // the source_string. Safely strip the const-ness of input string.
-void InitializeNdisString(NDIS_STRING& destination_string,
+void InitializeNdisString(NDIS_STRING* destination_string,
                           const char* source_string) {
   PAGED_CODE();
   NdisInitializeString(
-      &destination_string,
+      destination_string,
       const_cast<UCHAR*>(reinterpret_cast<const UCHAR*>(source_string)));
 }
 
@@ -43,7 +43,7 @@ void GetConfigurationEntry(NDIS_HANDLE configuration_handle,
   PAGED_CODE();
   NDIS_STATUS status;
   NDIS_STRING name = {};
-  InitializeNdisString(name, entry->name);
+  InitializeNdisString(&name, entry->name);
   PNDIS_CONFIGURATION_PARAMETER param = nullptr;
 
   NdisReadConfiguration(&status, &param, configuration_handle, &name,
@@ -128,6 +128,10 @@ void AdapterConfiguration::LoadDefaultValue() {
   // RSC config, 0 - Disabled, 1 - Enabled.
   rsc_ipv4_ = {"*RscIPv4", 1, 0, 1};
   rsc_ipv6_ = {"*RscIPv6", 1, 0, 1};
+
+  // Override allowing a client to force the driver to run in QPL mode.
+  // 0 - Disabled, 1 - Enabled.
+  allow_raw_addressing_ = {"RawAddressing", 1, 0, 1};
 }
 
 void AdapterConfiguration::Initialize(NDIS_HANDLE miniport_handle) {
@@ -150,6 +154,7 @@ void AdapterConfiguration::Initialize(NDIS_HANDLE miniport_handle) {
     GetConfigurationEntry(configuration_handle, &rss_);
     GetConfigurationEntry(configuration_handle, &rsc_ipv4_);
     GetConfigurationEntry(configuration_handle, &rsc_ipv6_);
+    GetConfigurationEntry(configuration_handle, &allow_raw_addressing_);
 
     // Read Mac address.
     PVOID network_addr;

@@ -29,10 +29,6 @@
 #include "shared_memory.h"       // NOLINT: include directory
 #include "utils.h"               // NOLINT: include directory
 
-// Default number of NBLs to indicate per DPC. Same as NDIS_INDICATE_ALL_NBLS
-// but to support NDIS version other than NIDS620, define by ourselves.
-constexpr UINT32 kIndicateAllNBLs = ~0ul;
-
 __declspec(align(kCacheLineSize)) class RxRing final : public RingBase {
  public:
   RxRing()
@@ -42,7 +38,8 @@ __declspec(align(kCacheLineSize)) class RxRing final : public RingBase {
         rss_enabled_(false),
         rss_hash_type_(0),
         rss_hash_function_(0),
-        checksum_offload_enabled_(false) {}
+        checksum_offload_enabled_(false),
+        pending_async_packet_count_(0) {}
   ~RxRing();
 
   // Not copyable or movable
@@ -52,12 +49,19 @@ __declspec(align(kCacheLineSize)) class RxRing final : public RingBase {
   // Initialize the object and allocate required resources
   // Return true if allocation succeeds or false otherwise.
   bool Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
-            UINT32 num_descriptor, QueuePageList* queue_page_list,
-            UINT32 notify_id, AdapterResources* adapter_resourcee,
+            UINT32 num_descriptor, bool use_raw_addressing,
+            QueuePageList* queue_page_list, UINT32 notify_id,
+            UINT32 max_data_size, AdapterResources* adapter_resourcee,
             AdapterStatistics* statistics,
             const DeviceCounter* device_counters);
 
   void Release();
+
+  // It is not safe to release the ring while there are net buffer lists that
+  // were handled asynchronously still outstanding.
+  bool IsSafeToRelease() const {
+    return pending_async_packet_count_ == 0 && IsPrepareForRelease();
+  }
 
   PHYSICAL_ADDRESS DescriptorRingPhysicalAddr() const {
     return descriptor_ring_.physical_address();
@@ -107,15 +111,23 @@ __declspec(align(kCacheLineSize)) class RxRing final : public RingBase {
   SharedMemory<RxDataRingSlot> data_ring_;
   SharedMemory<RxDescriptor> descriptor_ring_;
 
-  bool checksum_offload_enabled_;
-
   // RSS settings.
   bool rss_enabled_;
   UINT32 rss_hash_type_;
   UINT8 rss_hash_function_;
 
+  bool checksum_offload_enabled_;
+  UINT32 max_data_size_;
+
+  // When a net buffer list is handled via the asynchronous path this is
+  // incremented, and when the framework calls MiniportReturnNetBufferLists
+  // this is decremented. This must be zero before this ring is released.
+  INT16 pending_async_packet_count_;
+
 #ifdef DBG
   const UINT8* rss_secret_key_;
+  const PROCESSOR_NUMBER* indirection_table_;
+  UINT16 indirection_table_entry_count_;
 #endif
 };
 
@@ -128,6 +140,7 @@ inline void IncreaseRxDataRingPendingCount(RxRingEntry* rx_ring_entry,
   NT_ASSERT(rx_ring_entry->rsc_last == nullptr);
 
   InterlockedIncrement16(&rx_ring_entry->pending_count);
+  InterlockedIncrement16(rx_ring_entry->ring_pending_count);
   auto current_rx_ring_entry = reinterpret_cast<RxRingEntry*>(
       net_buffer_list->MiniportReserved[kNetBufferListRxRingEntryPtrIdx]);
 
@@ -156,6 +169,9 @@ inline void DecreaseRxDataRingPendingCount(NET_BUFFER_LIST* net_buffer_list) {
     RxRingEntry* next_entry = rx_ring_entry->rsc_next;
     rx_ring_entry->rsc_last = nullptr;
     rx_ring_entry->rsc_next = nullptr;
+
+    InterlockedDecrement16(rx_ring_entry->ring_pending_count);
+    NT_ASSERT(*rx_ring_entry->ring_pending_count >= 0);
 
     // This ring entry can be re-used for asynchronous transfer immediately
     // after InterlockedDecrement16 returns.

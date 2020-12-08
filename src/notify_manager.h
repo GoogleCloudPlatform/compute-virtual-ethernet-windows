@@ -44,19 +44,23 @@ class NotifyManager final {
  public:
   NotifyManager()
       : num_notify_blocks_(0),
+        mgmt_msix_index_(0),
+        msi_table_(nullptr),
+        miniport_handle_(nullptr),
         rx_config_(nullptr),
         tx_config_(nullptr),
-        mgmt_msix_index_(0),
         notify_blocks_physical_address_(0),
-        notify_blocks_(nullptr) {}
+        notify_blocks_(nullptr),
+        message_id_to_notify_id_map_(nullptr) {}
   ~NotifyManager();
 
   // Initialize Object. Based on num_msi_vectors and policy on assigning
   // interrupt to rx/tx ring, it will adjust num_tx_slices and num_rx_slices
   // if necessary.
   // Return true if succeed and false otherwise.
-  bool Init(NDIS_HANDLE miniport_handle, UINT32 num_msi_vectors,
-            QueueConfig* tx_config, QueueConfig* rx_config);
+  bool Init(NDIS_HANDLE miniport_handle,
+            const IO_INTERRUPT_MESSAGE_INFO* msi_table, QueueConfig* tx_config,
+            QueueConfig* rx_config);
   void Release();
 
   // Register Rx Ring and return the notify id.
@@ -68,13 +72,13 @@ class NotifyManager final {
   void Reset();
 
   // Get num of rx rings for specific notify block.
-  UINT32 GetRxRingCount(UINT32 notify_id) const;
+  UINT32 GetRxRingCount(UINT32 message_id) const;
   // Get rx ring from specific notify block. Since one notify block can contains
   // multiple rx rings, method also requires ring_idx.
-  RxRing* GetRxRing(UINT32 notify_id, UINT32 ring_idx) const;
+  RxRing* GetRxRing(UINT32 message_id, UINT32 ring_idx) const;
 
   // Get trx ring from notify block.
-  TxRing* GetTxRing(UINT32 notify_id) const;
+  TxRing* GetTxRing(UINT32 message_id) const;
 
   UINT64 notify_blocks_physical_address() const {
     return notify_blocks_physical_address_;
@@ -89,7 +93,11 @@ class NotifyManager final {
   UINT32 num_notify_blocks() const { return num_notify_blocks_; }
 
   // Got doorbell index for notify block.
-  UINT32 GetInterruptDoorbellIndex(UINT32 notify_id) const;
+  UINT32 GetInterruptDoorbellIndex(UINT32 message_id) const;
+
+  // Updates the processor affinities for rx slices if required by the RSS
+  // configuration's indirection table.
+  void UpdateRxProcessorAffinities(const RSSConfiguration& rss_config);
 
   NotifyManager(const NotifyManager&) = delete;
   NotifyManager& operator=(const NotifyManager&) = delete;
@@ -98,10 +106,27 @@ class NotifyManager final {
   UINT32 GetTxNotifyId(UINT32 slice_num);
   UINT32 GetRxNotifyId(UINT32 slice_num);
 
+  // Gets the notify block from the notify ID. This ID will not change when
+  // slices get remapped to new processor affinities.
   NotifyBlock* GetNotifyBlock(UINT notify_id) const;
+
+  // Gets the notify block from the message ID. This ID will change when slices
+  // get remapped to new processor affinities, and is the ID provided by the
+  // interrupt handler.
+  NotifyBlock* GetMappedNotifyBlock(UINT message_id) const;
+
+  // Changes a notify block's processor affinity to match the message info
+  // indexed by message ID.
+  void ConfigureMsiXTableEntry(UINT32 notify_id, UINT32 message_id,
+                               UINT32 slice, NotifyBlock* block);
+
+  // Validates or updates the processor affinity for a given rx slice.
+  void UpdateRxProcessorAffinity(UINT32 slice_num, PROCESSOR_NUMBER processor);
 
   UINT32 num_notify_blocks_;
   UINT32 mgmt_msix_index_;
+  const IO_INTERRUPT_MESSAGE_INFO* msi_table_;
+  NDIS_HANDLE miniport_handle_;
 
   QueueConfig* rx_config_;
   QueueConfig* tx_config_;
@@ -116,6 +141,12 @@ class NotifyManager final {
   // memory location with the notify_blocks_physical_address_ and gets used
   // insider driver.
   NotifyBlock* notify_blocks_;
+  // A mapping of message IDs to notify block IDs. When using RSS Windows may
+  // load balance via the indirection table, which requires us to change the
+  // processor affinity of a given notify block. When the MSI-X table entry
+  // is swapped to change processor affinity, the message ID provided during
+  // interrupts will change too.
+  UINT32* message_id_to_notify_id_map_;
 };
 
 #endif  // NOTIFY_MANAGER_H_

@@ -36,26 +36,63 @@ void AckInterrupt(UINT32 irq_doorbell_index, AdapterContext* context) {
   KeMemoryBarrier();  // Make sure all read/write is done before ring door bell.
   context->resources.WriteDoorbell(irq_doorbell_index, kInterruptAckEvent);
 }
+
+void MaskInterrupt(UINT32 irq_doorbell_index, AdapterContext* context) {
+  KeMemoryBarrier();  // Make sure all read/write is done before ring door bell.
+  context->resources.WriteDoorbell(irq_doorbell_index, kInterruptRequestMask);
+}
+
+bool ProcessRxRings(ULONG max_nbls_to_indicate, ULONG message_id,
+                    UINT32 num_rx_rings, AdapterContext* context) {
+  PacketAssembler packet_assembler(
+      max_nbls_to_indicate, context->resources.net_buffer_list_pool(),
+      context->resources.miniport_handle(), context->device.rsc_ipv4_enabled(),
+      &context->statistics);
+  bool all_packets_processed = true;
+  for (UINT i = 0; i < num_rx_rings && packet_assembler.CanAllocateNBL(); i++) {
+    RxRing* rx_ring =
+        context->device.notify_manager()->GetRxRing(message_id, i);
+    if (!rx_ring->is_init()) {
+      continue;
+    }
+
+    all_packets_processed =
+        all_packets_processed && rx_ring->ProcessPendingPackets(
+                                     /*is_dpc_level=*/true, &packet_assembler);
+  }
+
+  packet_assembler.ReportPackets(context->resources.miniport_handle());
+  return all_packets_processed;
+}
+
 }  //  namespace
 
 // Handler to disable interrupts for diagnostic and troubleshooting purposes.
 VOID MiniportDisableInterruptEx(_In_ PVOID miniport_interrupt_context) {
-  DEBUGP(GVNIC_VERBOSE, "---> MiniportDisableInterruptEx\n");
+  DEBUGP(GVNIC_VERBOSE, "---> MiniportDisableInterruptEx");
   UNREFERENCED_PARAMETER(miniport_interrupt_context);
 
-  // TODO(ningyang): Disable interrupts on all queues
+  DEBUGP(GVNIC_ERROR,
+         "[%s] ERROR: Line-based interrupts are not used by the gVNIC device, "
+         "but the framework is attempting to disable them anyway which will "
+         "have no effect.",
+         __FUNCTION__);
 
   DEBUGP(GVNIC_VERBOSE, "<--- MiniportDisableInterruptEx\n");
 }
 
 // Handler to enable interrupts for diagnostic and troubleshooting purposes.
 VOID MiniportEnableInterruptEx(_In_ PVOID miniport_interrupt_context) {
-  DEBUGP(GVNIC_VERBOSE, "---> MiniportEnableInterruptEx\n");
+  DEBUGP(GVNIC_VERBOSE, "---> MiniportEnableInterruptEx");
   UNREFERENCED_PARAMETER(miniport_interrupt_context);
 
-  // TODO(ningyang): Enable interrupts on all queues
+  DEBUGP(GVNIC_ERROR,
+         "[%s] ERROR: Line-based interrupts are not used by the gVNIC device, "
+         "but the framework is attempting to enable them anyway which will "
+         "have no effect.",
+         __FUNCTION__);
 
-  DEBUGP(GVNIC_VERBOSE, "<--- MiniportEnableInterruptEx\n");
+  DEBUGP(GVNIC_VERBOSE, "<--- MiniportEnableInterruptEx");
 }
 
 // Handler for interrupt.
@@ -86,21 +123,53 @@ VOID MiniportInterruptDPC(_In_ NDIS_HANDLE miniport_interrupt_context,
 // Handler for to enable a message interrupt for diagnostic and troubleshooting.
 VOID MiniportEnableMSIInterrupt(_In_ PVOID miniport_interrupt_context,
                                 _In_ ULONG message_id) {
-  DEBUGP(GVNIC_VERBOSE, "---> MiniportEnableMSIInterrupt\n");
-  UNREFERENCED_PARAMETER(miniport_interrupt_context);
-  UNREFERENCED_PARAMETER(message_id);
+  DEBUGP(GVNIC_VERBOSE, "---> MiniportEnableMSIInterrupt");
 
-  DEBUGP(GVNIC_VERBOSE, "<--- MiniportEnableMSIInterrupt\n");
+  AdapterContext* context =
+      static_cast<AdapterContext*>(miniport_interrupt_context);
+  const NotifyManager* notify_manager = context->device.notify_manager();
+  if (message_id == notify_manager->manager_queue_message_id()) {
+    DEBUGP(GVNIC_ERROR,
+           "[%s] ERROR: Message ID %d is a management interrupt which cannot "
+           "be selectively enabled.",
+           __FUNCTION__, message_id);
+  } else {
+    DEBUGP(GVNIC_WARNING,
+           "[%s] WARNING: Enabling interrupts for message ID %d after "
+           "disabling for diagnostic purposes.",
+           __FUNCTION__, message_id);
+    const UINT32 doorbell_index =
+        notify_manager->GetInterruptDoorbellIndex(message_id);
+    AckInterrupt(doorbell_index, context);
+  }
+
+  DEBUGP(GVNIC_VERBOSE, "<--- MiniportEnableMSIInterrupt");
 }
 
 // Handler to disable a message interrupt for diagnostic and troubleshooting.
 VOID MiniportDisableMSIInterrupt(_In_ PVOID miniport_interrupt_context,
                                  _In_ ULONG message_id) {
-  DEBUGP(GVNIC_VERBOSE, "---> MiniportDisableMSIInterrupt\n");
-  UNREFERENCED_PARAMETER(miniport_interrupt_context);
-  UNREFERENCED_PARAMETER(message_id);
+  DEBUGP(GVNIC_VERBOSE, "---> MiniportDisableMSIInterrupt");
 
-  DEBUGP(GVNIC_VERBOSE, "<--- MiniportDisableMSIInterrupt\n");
+  AdapterContext* context =
+      static_cast<AdapterContext*>(miniport_interrupt_context);
+  const NotifyManager* notify_manager = context->device.notify_manager();
+  if (message_id == notify_manager->manager_queue_message_id()) {
+    DEBUGP(GVNIC_ERROR,
+           "[%s] ERROR: Message ID %d is a management interrupt which cannot "
+           "be selectively disabled.",
+           __FUNCTION__, message_id);
+  } else {
+    DEBUGP(GVNIC_WARNING,
+           "[%s] WARNING: Disabling interrupts for message ID %d for "
+           "diagnostic purposes.",
+           __FUNCTION__, message_id);
+    const UINT32 doorbell_index =
+        notify_manager->GetInterruptDoorbellIndex(message_id);
+    MaskInterrupt(doorbell_index, context);
+  }
+
+  DEBUGP(GVNIC_VERBOSE, "<--- MiniportDisableMSIInterrupt");
 }
 
 // Handler for a message-based interrupt.
@@ -139,62 +208,58 @@ VOID MiniportMSIInterruptDpc(_In_ PVOID miniport_interrupt_context,
       static_cast<AdapterContext*>(miniport_interrupt_context);
   const NotifyManager* notify_manager = context->device.notify_manager();
 
-  bool ack_interrupt = true;
   if (message_id == notify_manager->manager_queue_message_id()) {
     context->device.HandleManagementQueueRequest();
   } else {
+    if (!context->device.QueueInterruptsEnabled()) {
+      // This DPC was scheduled before we masked off all interrupts and began
+      // tearing down the queues. The rings are no longer in a valid state.
+      return;
+    }
+
+    const UINT32 doorbell_index =
+        notify_manager->GetInterruptDoorbellIndex(message_id);
+    MaskInterrupt(doorbell_index, context);
+
+    bool ack_interrupt = true;
     TxRing* tx_ring = notify_manager->GetTxRing(message_id);
     UINT32 num_rx_rings = notify_manager->GetRxRingCount(message_id);
 
     // This is tx/rx interrupt.
     NT_ASSERT(tx_ring != nullptr || num_rx_rings > 0);
 
-    if (tx_ring != nullptr) {
-      NT_ASSERT(GetCurrentProcessorIndex() == tx_ring->slice());
+    if (tx_ring != nullptr && tx_ring->is_init()) {
       tx_ring->ProcessCompletePackets();
     }
 
     if (num_rx_rings > 0) {
-#if NDIS_SUPPORT_NDIS620
       auto* rx_throttle_parameters =
         static_cast<NDIS_RECEIVE_THROTTLE_PARAMETERS*>(
           receive_throttle_parameters);
-      PacketAssembler packet_assembler(
-          rx_throttle_parameters->MaxNblsToIndicate,
-          context->resources.net_buffer_list_pool(),
-          context->resources.miniport_handle(),
-          context->device.rsc_ipv4_enabled(), &context->statistics);
-      bool all_packet_processed = true;
 
-      for (UINT i = 0; i < num_rx_rings && packet_assembler.CanAllocateNBL();
-           i++) {
-        RxRing* rx_ring = notify_manager->GetRxRing(message_id, i);
-        all_packet_processed = all_packet_processed &&
-                               rx_ring->ProcessPendingPackets(
-                                   /*is_dpc_level=*/true, &packet_assembler);
-      }
+      bool all_packets_processed =
+          ProcessRxRings(rx_throttle_parameters->MaxNblsToIndicate, message_id,
+                         num_rx_rings, context);
 
-      if (!all_packet_processed) {
+      if (!all_packets_processed) {
         ack_interrupt = false;
         rx_throttle_parameters->MoreNblsPending = true;
       }
-#else
-      UNREFERENCED_PARAMETER(ndis_reserved_1);
-      PacketAssembler packet_assembler(kIndicateAllNBLs);
-      for (UINT i = 0; i < num_rx_rings && packet_assembler.CanAllocateNBL();
-           i++) {
-        RxRing* rx_ring = notify_manager->GetRxRing(message_id, i);
-        rx_ring->ProcessPendingPackets(/*is_dpc_level=*/true,
-                                       &packet_assembler);
-      }
-#endif
-      packet_assembler.ReportPackets(context->resources.miniport_handle());
     }
-  }
 
-  if (ack_interrupt) {
-    AckInterrupt(notify_manager->GetInterruptDoorbellIndex(message_id),
-                 context);
+    if (ack_interrupt) {
+      AckInterrupt(doorbell_index, context);
+
+      // See if the NIC has processed any tx or rx packets while device
+      // interrupts were masked off.
+      if (tx_ring != nullptr && tx_ring->is_init()) {
+        tx_ring->ProcessCompletePackets();
+      }
+      if (num_rx_rings > 0) {
+        ProcessRxRings(NDIS_INDICATE_ALL_NBLS, message_id, num_rx_rings,
+                       context);
+      }
+    }
   }
 
   DEBUGP(GVNIC_VERBOSE, "<--- MiniportMSIInterruptDPC");

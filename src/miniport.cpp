@@ -26,19 +26,19 @@ NDIS_HANDLE DriverHandle = nullptr;
 
 // Driver Entry Point. Called by kernel to register driver object.
 // Arguments:
-//   driver_object - Pointer to driver object created by system.
-//   registry_path - Pointer to the Unicode name of the registry path.
+//   DriverObject - Pointer to driver object created by system.
+//   RegistryPath - Pointer to the Unicode name of the registry path.
 //
 // Returns:
 //   NT Status code.
 NDIS_STATUS
-DriverEntry(_In_ PDRIVER_OBJECT driver_object,
-            _In_ PUNICODE_STRING registry_path) {
+DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
+            _In_ PUNICODE_STRING RegistryPath) {
   PAGED_CODE();
 
   NDIS_MINIPORT_DRIVER_CHARACTERISTICS driver_chars;
 
-  WPP_INIT_TRACING(driver_object, registry_path);
+  WPP_INIT_TRACING(DriverObject, RegistryPath);
 
   DEBUGP(GVNIC_VERBOSE, "---> DriverEntry - Version %u.%u",
          MAJOR_DRIVER_VERSION, MINOR_DRIVER_VERSION);
@@ -90,16 +90,15 @@ DriverEntry(_In_ PDRIVER_OBJECT driver_object,
   driver_chars.CancelOidRequestHandler = GvnicOidCancelRequest;
 
 #if NDIS_SUPPORT_NDIS61
-  driver_chars.DirectOidRequestHandler = GvnicDirectOidRequest;
-  driver_chars.CancelDirectOidRequestHandler = GvnicCancelDirectOidRequest;
+  driver_chars.DirectOidRequestHandler = NULL;
+  driver_chars.CancelDirectOidRequestHandler = NULL;
 #endif  // NDIS_SUPPORT_NDIS61
 
   NDIS_STATUS status = NdisMRegisterMiniportDriver(
-      driver_object, registry_path, NULL, &driver_chars, &DriverHandle);
-  if (NDIS_STATUS_SUCCESS != status) {
+      DriverObject, RegistryPath, NULL, &driver_chars, &DriverHandle);
+  if (status != NDIS_STATUS_SUCCESS) {
     DEBUGP(GVNIC_ERROR, "NdisMRegisterMiniportDriver failed: %d\n", status);
-    DriverUnload(driver_object);
-    status = NDIS_STATUS_FAILURE;
+    DriverUnload(DriverObject);
   }
 
   DEBUGP(GVNIC_VERBOSE, "<--- DriverEntry status 0x%08x\n", status);
@@ -109,8 +108,8 @@ DriverEntry(_In_ PDRIVER_OBJECT driver_object,
 // Unload Driver. Free all allocated resources, etc.
 //
 // Arguments:
-//   driver_object - pointer to a driver object.
-_Use_decl_annotations_ VOID DriverUnload(_In_ PDRIVER_OBJECT driver_object) {
+//   DriverObject - pointer to a driver object.
+_Use_decl_annotations_ VOID DriverUnload(_In_ PDRIVER_OBJECT DriverObject) {
   PAGED_CODE();
   DEBUGP(GVNIC_VERBOSE, "---> DriverUnload");
 
@@ -120,7 +119,7 @@ _Use_decl_annotations_ VOID DriverUnload(_In_ PDRIVER_OBJECT driver_object) {
   }
 
   DEBUGP(GVNIC_VERBOSE, "<--- DriverUnload");
-  WPP_CLEANUP(driver_object->DeviceObject);
+  WPP_CLEANUP(DriverObject);
 }
 
 // The entry point for the caller's MiniportSetOptions to register optional

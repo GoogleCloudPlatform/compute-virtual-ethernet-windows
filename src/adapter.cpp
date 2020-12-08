@@ -32,12 +32,12 @@ extern NDIS_HANDLE DriverHandle;
 namespace {
 constexpr int kGvnicMulticastListSize = 1;
 
-// TODO: Read it from device config.
-constexpr UINT kNumOfMaxTrafficQueues = 32;
-
 // Free resource allocated inside AdapterContext.
 inline void GvnicFreeMemory(AdapterContext* context) {
   PAGED_CODE();
+
+  // Interrupts can happen during this callback until this function returns.
+  context->resources.DeregisterInterrupts();
 
   // NdisFreeMemory doesn't call destructor. Call destructor explicitly will
   // make the compiler call delete operator. To make it clear that the code
@@ -127,10 +127,6 @@ NDIS_STATUS InitAdapterRegistrationAttributes(
       NDIS_MINIPORT_ATTRIBUTES_HARDWARE_DEVICE |
       NDIS_MINIPORT_ATTRIBUTES_BUS_MASTER |
       NDIS_MINIPORT_ATTRIBUTES_NO_HALT_ON_SUSPEND;  // Standard NIC flags.
-#if NDIS_SUPPORT_NDIS630
-  miniport_attrs.RegistrationAttributes.AttributeFlags |=
-      NDIS_MINIPORT_ATTRIBUTES_NO_PAUSE_ON_SUSPEND;
-#endif  // NDIS_SUPPORT_NDIS630
 
   miniport_attrs.RegistrationAttributes.CheckForHangTimeInSeconds = 4;
   miniport_attrs.RegistrationAttributes.InterfaceType = NdisInterfacePci;
@@ -358,23 +354,159 @@ UINT GetMsiVectorCount(const IO_RESOURCE_REQUIREMENTS_LIST& resource_list) {
   return msi_count;
 }
 
+// Helper function for getting the TargetedProcessors for an rx slice.
+KAFFINITY GetTargetedProcessorsForRx(
+    UINT num_rx_configured, UINT rx_scale_factor,
+    PNDIS_RSS_PROCESSOR_INFO rss_processor_info) {
+  if (rss_processor_info == nullptr ||
+      num_rx_configured >= rss_processor_info->RssProcessorCount) {
+    return 1ull << (num_rx_configured * rx_scale_factor);
+  } else {
+    PUCHAR first_proc = reinterpret_cast<PUCHAR>(rss_processor_info) +
+                        rss_processor_info->RssProcessorArrayOffset;
+    PNDIS_RSS_PROCESSOR processor = reinterpret_cast<PNDIS_RSS_PROCESSOR>(
+        first_proc +
+        num_rx_configured * rss_processor_info->RssProcessorEntrySize);
+    return 1ull << processor->ProcNum.Number;
+  }
+}
+
+IO_RESOURCE_REQUIREMENTS_LIST* RequestAdditionalMsiResourcesForRss(
+    IO_RESOURCE_REQUIREMENTS_LIST* old_requirements_list,
+    NDIS_RSS_PROCESSOR_INFO* rss_processor_info, UINT num_rx, UINT num_tx,
+    NDIS_HANDLE device_handle) {
+  const ULONG additional_entries =
+      rss_processor_info->RssProcessorCount - num_rx;
+  const ULONG additional_size_required =
+      sizeof(IO_RESOURCE_DESCRIPTOR) * additional_entries;
+  const ULONG size_of_new_list =
+      old_requirements_list->ListSize + additional_size_required;
+  IO_RESOURCE_REQUIREMENTS_LIST* new_requirements_list =
+      static_cast<IO_RESOURCE_REQUIREMENTS_LIST*>(
+          NdisAllocateMemoryWithTagPriority(device_handle, size_of_new_list,
+                                            kGvnicMemoryTag,
+                                            NormalPoolPriority));
+  if (new_requirements_list == nullptr) {
+    return nullptr;
+  } else {
+    NdisZeroMemory(new_requirements_list, size_of_new_list);
+  }
+
+  // We want to insert our new entries directly after the existing entries.
+  // There is an additional entry we earlier reserved for driver management.
+  ULONG expected_msi_entries = num_rx + num_tx + 1;
+  ULONG seen_msi_entries = 0;
+  bool added_additional_entries = false;
+
+  // The resource requirement list has the form shown below. We have allocated
+  // additional memory for new MSI-X entries which should come immediately
+  // after the existing MSI-X entries within the same resource list.
+  //
+  // IO_RESOURCE_REQUIREMENTS_LIST
+  //   IO_RESOURCE_LIST[0]
+  //     IO_RESOURCE_DESCRIPTOR[0]
+  //     ...
+  //     IO_RESOURCE_DESCRIPTOR[Count - 1]
+  //   IO_RESOURCE_LIST[1]
+  //     IO_RESOURCE_DESCRIPTOR[0]
+  //     ...
+  //     IO_RESOURCE_DESCRIPTOR[Count - 1]
+  //   ...
+  //   IO_RESOURCE_LIST[AlternativeLists - 1]
+  NdisMoveMemory(new_requirements_list, old_requirements_list,
+                 sizeof(IO_RESOURCE_REQUIREMENTS_LIST));
+  new_requirements_list->ListSize = size_of_new_list;
+
+  IO_RESOURCE_LIST* new_resource_list = new_requirements_list->List;
+  IO_RESOURCE_LIST* old_resource_list = old_requirements_list->List;
+  for (UINT i = 0; i < new_requirements_list->AlternativeLists; i++) {
+    NdisMoveMemory(new_resource_list, old_resource_list,
+                   sizeof(IO_RESOURCE_LIST));
+    for (UINT old_desc_index = 0, new_desc_index = 0;
+         old_desc_index < old_resource_list->Count;
+         old_desc_index++, new_desc_index++) {
+      IO_RESOURCE_DESCRIPTOR* old_desc =
+          &old_resource_list->Descriptors[old_desc_index];
+      IO_RESOURCE_DESCRIPTOR* new_desc =
+          &new_resource_list->Descriptors[new_desc_index];
+      NdisMoveMemory(new_desc, old_desc, sizeof(IO_RESOURCE_DESCRIPTOR));
+      if (new_desc->Type == CmResourceTypeInterrupt &&
+          (new_desc->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) &&
+          (new_desc->Flags & CM_RESOURCE_INTERRUPT_POLICY_INCLUDED)) {
+        seen_msi_entries++;
+      }
+
+      if (added_additional_entries == false &&
+          seen_msi_entries == expected_msi_entries) {
+        added_additional_entries = true;
+        UINT curr_rss_proc_index = num_rx;
+
+        while (new_desc_index < old_desc_index + additional_entries) {
+          new_desc_index++;
+          IO_RESOURCE_DESCRIPTOR* additional_desc =
+              &new_resource_list->Descriptors[new_desc_index];
+          additional_desc->Type = CmResourceTypeInterrupt;
+          additional_desc->ShareDisposition = CmResourceShareDeviceExclusive;
+          additional_desc->Flags = CM_RESOURCE_INTERRUPT_LATCHED |
+                                   CM_RESOURCE_INTERRUPT_MESSAGE |
+                                   CM_RESOURCE_INTERRUPT_POLICY_INCLUDED;
+
+          // Both minimum and maximum are set to the same value for MSI-X
+          // interrupts.
+          additional_desc->u.Interrupt.MinimumVector =
+              CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN;
+          additional_desc->u.Interrupt.MaximumVector =
+              CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN;
+
+          additional_desc->u.Interrupt.AffinityPolicy =
+              IrqPolicySpecifiedProcessors;
+
+          PUCHAR first_proc = reinterpret_cast<PUCHAR>(rss_processor_info) +
+                              rss_processor_info->RssProcessorArrayOffset;
+          PNDIS_RSS_PROCESSOR processor = reinterpret_cast<PNDIS_RSS_PROCESSOR>(
+              first_proc +
+              curr_rss_proc_index * rss_processor_info->RssProcessorEntrySize);
+          additional_desc->u.Interrupt.TargetedProcessors =
+              (1ull << processor->ProcNum.Number);
+          new_resource_list->Count++;
+
+          curr_rss_proc_index++;
+        }
+      }
+    }
+
+    // Advance to the next IO_RESOURCES_LIST block in memory.
+    old_resource_list = reinterpret_cast<IO_RESOURCE_LIST*>(
+        old_resource_list->Descriptors + old_resource_list->Count);
+    new_resource_list = reinterpret_cast<IO_RESOURCE_LIST*>(
+        new_resource_list->Descriptors + new_resource_list->Count);
+  }
+
+  return new_requirements_list;
+}
+
 // Set target processor for msi vectors.
 //
 // Arguments:
 //  num_tx: number of tx queue.
 //  num_rx: number of rx queue.
 //  rx_scale_factor: the internal between two interrupt target processor.
+//  rss_processor_info: system information about rss processors.
 //  resource_list: resource list contain msi vectors.
 void SetMsiAffinity(UINT num_tx, UINT num_rx, UINT rx_scale_factor,
+                    PNDIS_RSS_PROCESSOR_INFO rss_processor_info,
                     IO_RESOURCE_REQUIREMENTS_LIST* resource_list) {
   UINT num_tx_configured = 0;
   UINT num_rx_configured = 0;
 
-  // The following logic tries to optimize for a most common scenario:
+  // The following logic tries to optimize for the most common scenario:
   //  - num_rx == number_processor / 2
   //  - RSS is turned on
-  // In this case, since RSS will skip hyperthreading cpus, we distrubute
-  // interrupts with the follows:
+  //
+  // The preference will be to follow system provided RSS CPU information. If
+  // there is no provided RSS CPU information, or we have more rx queues than
+  // RSS CPUs, we fall back to the default logic of spreading rx queues across
+  // every second vCPU to avoid hyerpthreading CPUs.
   // +--------+--------+--------+--------+-----+
   // | vCPU_1 | vCPU_2 | vCPU_3 | vCPU_4 | ... |
   // | rx_0   | X      | rx_1   | X      | ... |
@@ -393,8 +525,8 @@ void SetMsiAffinity(UINT num_tx, UINT num_rx, UINT rx_scale_factor,
           num_tx_configured++;
         } else if (num_rx_configured < num_rx) {
           desc->u.Interrupt.AffinityPolicy = IrqPolicySpecifiedProcessors;
-          desc->u.Interrupt.TargetedProcessors =
-              (1ull << (num_rx_configured * rx_scale_factor));
+          desc->u.Interrupt.TargetedProcessors = GetTargetedProcessorsForRx(
+              num_rx_configured, rx_scale_factor, rss_processor_info);
           num_rx_configured++;
         }
       }
@@ -538,15 +670,21 @@ _Use_decl_annotations_ VOID
 GvnicAdapterShutdown(NDIS_HANDLE miniport_adapter_context,
                      NDIS_SHUTDOWN_ACTION shutdown_action) {
   UNREFERENCED_PARAMETER(shutdown_action);
+  UNREFERENCED_PARAMETER(miniport_adapter_context);
   DEBUGP(GVNIC_VERBOSE, "---> GvnicAdapterShutdown\n");
 
-  static_cast<AdapterContext*>(miniport_adapter_context)->device.Shutdown();
+  if (shutdown_action == NdisShutdownBugCheck) {
+    // This is called at a high IRQL, and any actions taken here must be
+    // allowable at high IRQLs. Do not attempt to free resources.
+    return;
+  }
 
+  // We rely on GvnicHalt to free resources and deconfigure the device, so no
+  // additional work is currently being done in the shutdown handler.
   DEBUGP(GVNIC_VERBOSE, "<--- GvnicAdapterShutdown\n");
 }
 
 // Called by NDIS to notify the driver of Plug and Play (PnP) events.
-// TODO(ningyang): handle NdisDevicePnPEventSurpriseRemoved case.
 //
 // Arguments:
 //   miniport_adapter_context - A handle to a context area that the miniport
@@ -561,6 +699,9 @@ GvnicDevicePnPEvent(NDIS_HANDLE miniport_adapter_context,
   UNREFERENCED_PARAMETER(net_device_pnp_event);
   DEBUGP(GVNIC_VERBOSE, "---> GvnicDevicePnPEvent\n");
 
+  // Surprise removal of the gVNIC virtual device is not supported. If the
+  // system somehow gets into this state, nothing needs to be done as GvnicHalt
+  // will be invoked immediately after which will pause queues and free memory.
   DEBUGP(GVNIC_VERBOSE, "<--- GvnicDevicePnPEvent\n");
 }
 
@@ -627,8 +768,6 @@ GvnicRemoveDevice(_In_ NDIS_HANDLE miniport_add_device_context) {
 _Use_decl_annotations_ NDIS_STATUS GvnicFilterResource(
     _In_ NDIS_HANDLE miniport_add_device_context, _In_ PIRP irp) {
   PAGED_CODE();
-  UNREFERENCED_PARAMETER(miniport_add_device_context);
-  UNREFERENCED_PARAMETER(irp);
   DEBUGP(GVNIC_VERBOSE, "---> GvnicFilterResource");
 
   auto resource_list = reinterpret_cast<IO_RESOURCE_REQUIREMENTS_LIST*>(
@@ -640,8 +779,8 @@ _Use_decl_annotations_ NDIS_STATUS GvnicFilterResource(
 
   // Prepare the msi with best scenario: one vector per processor for all
   // queues.
-  UINT num_tx = min(processor_count, kNumOfMaxTrafficQueues);
-  UINT num_rx = min(processor_count, kNumOfMaxTrafficQueues);
+  UINT num_tx = min(processor_count, kMaxPerDirectionTrafficSlices);
+  UINT num_rx = min(processor_count, kMaxPerDirectionTrafficSlices);
   UINT num_msi = GetMsiVectorCount(*resource_list);
 
   // Need at least three msi(1 mgt, 1 tx and 1 rx) for the driver to work
@@ -670,7 +809,73 @@ _Use_decl_annotations_ NDIS_STATUS GvnicFilterResource(
     }
   }
 
-  SetMsiAffinity(num_tx, num_rx, rx_scale_factor, resource_list);
+  // Get the RSS processor information. The default MSI configuration will
+  // assume that the driver is going to use RSS. The first call gets the size
+  // of the required buffer, and the next call fills the buffer with the system
+  // settings.
+  SIZE_T size = 0;
+  PNDIS_RSS_PROCESSOR_INFO rss_processor_info = nullptr;
+  NDIS_STATUS status = NdisGetRssProcessorInformation(
+      miniport_add_device_context, /*RssProcessorInfo=*/nullptr, &size);
+  if (status != NDIS_STATUS_BUFFER_TOO_SHORT || size == 0) {
+    DEBUGP(GVNIC_WARNING,
+           "[%s] WARNING: Unable to query system for the size of the memory "
+           "allocation needed to query RSS processors.",
+           __FUNCTION__);
+  } else {
+    rss_processor_info =
+        static_cast<PNDIS_RSS_PROCESSOR_INFO>(NdisAllocateMemoryWithTagPriority(
+            miniport_add_device_context, static_cast<ULONG>(size),
+            kGvnicMemoryTag, NormalPoolPriority));
+    if (rss_processor_info == nullptr) {
+      DEBUGP(GVNIC_ERROR,
+             "[%s] ERROR: Unable to allocate %u bytes to query system for RSS "
+             "processor information.",
+             __FUNCTION__, static_cast<ULONG>(size));
+    } else {
+      NdisZeroMemory(rss_processor_info, size);
+      status = NdisGetRssProcessorInformation(miniport_add_device_context,
+                                              rss_processor_info, &size);
+      if (status != NDIS_STATUS_SUCCESS) {
+        DEBUGP(GVNIC_WARNING,
+               "[%s] WARNING: Unable to query system for RSS processors.",
+               __FUNCTION__);
+        NdisFreeMemory(rss_processor_info, 0, 0);
+        rss_processor_info = nullptr;
+      }
+    }
+  }
+
+  SetMsiAffinity(num_tx, num_rx, rx_scale_factor, rss_processor_info,
+                 resource_list);
+
+  if (rss_processor_info != nullptr) {
+    if (rss_processor_info->RssProcessorCount > num_rx) {
+      IO_RESOURCE_REQUIREMENTS_LIST* new_list =
+          RequestAdditionalMsiResourcesForRss(resource_list, rss_processor_info,
+                                              num_rx, num_tx,
+                                              miniport_add_device_context);
+      if (new_list == nullptr) {
+        DEBUGP(GVNIC_WARNING,
+               "[%s] WARNING: Unable to create and configure a new resource "
+               "list to allow changing slice affinities to match complex "
+               "indirection tables.",
+               __FUNCTION__);
+      } else {
+        // A driver takes ownership of an IRP when it receives it, so we can
+        // simply free the existing list (although this might look strange).
+        NdisFreeMemory(resource_list, 0, 0);
+        irp->IoStatus.Information = reinterpret_cast<ULONG_PTR>(new_list);
+
+        DEBUGP(GVNIC_INFO,
+               "[%s]: Requested %d additional MSI resources to allow changing "
+               "slice affinities to any RSS processor.",
+               __FUNCTION__, rss_processor_info->RssProcessorCount - num_rx);
+      }
+    }
+    NdisFreeMemory(rss_processor_info, 0, 0);
+  }
+
   irp->IoStatus.Status = STATUS_SUCCESS;
 
   DEBUGP(GVNIC_VERBOSE, "<--- GvnicFilterResource");
@@ -720,8 +925,8 @@ VOID GvnicReturnNetBufferLists(NDIS_HANDLE miniport_adapter_context,
     NET_BUFFER_LIST* nbl_to_free = net_buffer_lists;
     net_buffer_lists = NET_BUFFER_LIST_NEXT_NBL(net_buffer_lists);
     NET_BUFFER_LIST_NEXT_NBL(nbl_to_free) = nullptr;
-    DecreaseRxDataRingPendingCount(nbl_to_free);
     FreeMdlsFromReceiveNetBuffer(NET_BUFFER_LIST_FIRST_NB(nbl_to_free));
+    DecreaseRxDataRingPendingCount(nbl_to_free);
   }
   DEBUGP(GVNIC_VERBOSE, "<--- GvnicReturnNetBufferLists");
 }
@@ -759,4 +964,6 @@ VOID GvnicCancelSendNetBufferLists(NDIS_HANDLE miniport_adapter_context,
                                    PVOID cancel_id) {
   UNREFERENCED_PARAMETER(miniport_adapter_context);
   UNREFERENCED_PARAMETER(cancel_id);
+
+  // TODO(b/174525218): Support cancelling queued NET_BUFFER_LISTs.
 }

@@ -175,6 +175,8 @@ constexpr size_t kMaxTcpHeaderSize = sizeof(TcpHeader) + 40;
 constexpr size_t kMaxIPHeaderSize = 60;
 // IEEE 802.1ad allow 2 VLAN tag and each is 4 bytes.
 constexpr size_t kMaxEthHeaderSize = kEthHeaderSize + 8;
+// Maximum size of a TCP or UDP packet.
+constexpr size_t kMaxPacketSize = MAXUINT16;
 
 void LogMacAddress(const char* message, const UCHAR* mac);
 

@@ -17,12 +17,11 @@
 #include <ndis.h>
 
 #include "netutils.h"   // NOLINT: include directory
-#include "ring_base.h"  // NOLINT: include directory
 #include "utils.h"      // NOLINT: include directory
 
 namespace {
-constexpr UINT8 kTcpChecksumOffset = FIELD_OFFSET(TcpHeader, checksum);
-constexpr UINT8 kUdpChecksumOffset = FIELD_OFFSET(UdpHeader, checksum);
+const UINT8 kTcpChecksumOffset = FIELD_OFFSET(TcpHeader, checksum);
+const UINT8 kUdpChecksumOffset = FIELD_OFFSET(UdpHeader, checksum);
 }  // namespace
 
 TxNetBuffer::TxNetBuffer(
@@ -48,7 +47,7 @@ TxNetBuffer::TxNetBuffer(
     return;
   }
 
-  int offset = NET_BUFFER_DATA_OFFSET(net_buffer);
+  int offset = NET_BUFFER_CURRENT_MDL_OFFSET(net_buffer);
   void* header_addr = OffsetToPointer(mdl_addr, offset);
   eth_header_ = reinterpret_cast<ETH_HEADER*>(header_addr);
 

@@ -52,15 +52,23 @@ constexpr NDIS_OID kSupportedOids[] = {
     OID_PNP_SET_POWER,    // Set
     OID_PNP_QUERY_POWER,  // Query
 
+    OID_GEN_MEDIA_SUPPORTED,  // Query, supported but obsolete.
+    OID_GEN_MEDIA_IN_USE,     // Query, supported but obsolete.
+    OID_GEN_HARDWARE_STATUS,  // Query, supported but obsolete.
+
+    OID_GEN_MAXIMUM_SEND_PACKETS,    // Query, supported but obsolete.
+    OID_GEN_XMIT_ERROR,              // Query, supported but obsolete.
+    OID_GEN_RCV_ERROR,               // Query, supported but obsolete.
+    OID_GEN_RCV_NO_BUFFER,           // Query, supported but obsolete.
+    OID_802_3_RCV_ERROR_ALIGNMENT,   // Query, supported but obsolete.
+    OID_802_3_XMIT_ONE_COLLISION,    // Query, supported but obsolete.
+    OID_802_3_XMIT_MORE_COLLISIONS,  // Query, supported but obsolete.
+
     OID_GEN_RECEIVE_SCALE_PARAMETERS,  // Set, Query is handled by NDIS
 };
 
 extern "C" {
 MINIPORT_OID_REQUEST GvnicOidRequest;
 MINIPORT_CANCEL_OID_REQUEST GvnicOidCancelRequest;
-#if NDIS_SUPPORT_NDIS61
-MINIPORT_DIRECT_OID_REQUEST GvnicDirectOidRequest;
-MINIPORT_CANCEL_DIRECT_OID_REQUEST GvnicCancelDirectOidRequest;
-#endif  // NDIS_SUPPORT_NDIS61
 }
 #endif  // OID_H_

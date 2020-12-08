@@ -33,6 +33,8 @@ constexpr UINT kMaxTxTrafficClass = 8;
 constexpr UINT kMaxVersionLength = 1024;  // Device accept max 1024
 constexpr char kVersionPrefix[] = "NDIS-";
 
+constexpr ULONG kMicrosecondsBetweenPollingRingsForRelease = 5000000;  // 5s.
+
 // By default, we only use one traffic class and user/agent can overwrite this
 // value later.
 constexpr UINT kDefaultTxTrafficClassCount = 1;
@@ -66,6 +68,7 @@ NDIS_STATUS GvnicPciDevice::Init(AdapterResources* resources,
   PAGED_CODE();
   DEBUGP(GVNIC_VERBOSE, "---> GvnicPciDevice::Initialize\n");
 
+  stop_reason_ = NDIS_STATUS_PAUSED;
   resources_ = resources;
   statistics_ = statistics;
   NdisAllocateSpinLock(&rx_checksum_enabled_spin_lock_);
@@ -84,8 +87,10 @@ NDIS_STATUS GvnicPciDevice::Init(AdapterResources* resources,
   if (status == NDIS_STATUS_SUCCESS) {
     status = ConfigureDeviceResource();
   }
+  if (status == NDIS_STATUS_SUCCESS) {
+    rss_config_.Init(configuration.is_rss_enabled(), rx_config_.num_slices);
+  }
 
-  rss_config_.Init(configuration.is_rss_enabled(), rx_config_.num_slices);
   DEBUGP(GVNIC_VERBOSE, "<--- GvnicPciDevice::Initialize status 0x%08x\n",
          status);
   return status;
@@ -93,7 +98,6 @@ NDIS_STATUS GvnicPciDevice::Init(AdapterResources* resources,
 
 void GvnicPciDevice::Release() {
   PAGED_CODE();
-
   notify_manager_.Release();
   UnregisterRings();
   FreeRings();
@@ -101,6 +105,10 @@ void GvnicPciDevice::Release() {
   admin_queue_.DeconfigureDeviceResource();
   admin_queue_.Release();
   counter_array_.Release();
+
+  NdisFreeSpinLock(&rss_config_spin_lock_);
+  NdisFreeSpinLock(&eth_header_len_spin_lock_);
+  NdisFreeSpinLock(&rx_checksum_enabled_spin_lock_);
 }
 
 void GvnicPciDevice::Reset(AdapterResources* resources,
@@ -121,6 +129,7 @@ NDIS_STATUS GvnicPciDevice::LoadAdapterConfiguration(
   max_packet_size_.max_data_size = configuration.mtu();
   max_packet_size_.max_full_size =
       max_packet_size_.max_data_size + kEthHeaderSize;
+  allow_raw_addressing_from_registry_ = configuration.allow_raw_addressing();
 
   SetOffloadConfiguration(configuration, &offload_configuration_);
 
@@ -214,7 +223,14 @@ NDIS_STATUS GvnicPciDevice::LoadDeviceConfiguration() {
     return status;
   }
 
-  status = admin_queue_.DescribeDevice(&device_params_.descriptor);
+  device_params_.support_raw_addressing = false;
+  status = admin_queue_.DescribeDevice(&device_params_.descriptor,
+                                       &device_params_.support_raw_addressing);
+  if (status != NDIS_STATUS_SUCCESS) {
+    return status;
+  }
+
+  status = SetTransmitQueueConfig();
   if (status != NDIS_STATUS_SUCCESS) {
     return status;
   }
@@ -222,25 +238,56 @@ NDIS_STATUS GvnicPciDevice::LoadDeviceConfiguration() {
   ETH_COPY_NETWORK_ADDRESS(permanent_mac_, device_params_.descriptor.mac);
   ETH_COPY_NETWORK_ADDRESS(current_mac_, device_params_.descriptor.mac);
 
-  SetTransmitQueueConfig();
-
   return status;
 }
 
-void GvnicPciDevice::SetTransmitQueueConfig() {
+NDIS_STATUS GvnicPciDevice::SetTransmitQueueConfig() {
   PAGED_CODE();
 
-  tx_config_.max_traffic_class =
+  UINT32 tx_queue_size_bytes =
+      device_params_.descriptor.tx_queue_size * sizeof(TxDescriptor);
+  if (tx_queue_size_bytes == 0 || tx_queue_size_bytes % PAGE_SIZE != 0) {
+    DEBUGP(GVNIC_ERROR,
+           "[%s] ERROR: Tx queues must be a multiple of the page size. The "
+           "device requested %d queue entries, each entry is %d bytes, and the "
+           "total requested queue size is %d bytes.",
+           __FUNCTION__, device_params_.descriptor.tx_queue_size,
+           sizeof(TxDescriptor), tx_queue_size_bytes);
+    NdisWriteErrorLogEntry(resources_->miniport_handle(),
+                           NDIS_ERROR_CODE_UNSUPPORTED_CONFIGURATION,
+                           /*NumberOfErrorValues=*/2, __LINE__,
+                           tx_queue_size_bytes);
+    return NDIS_STATUS_FAILURE;
+  }
+
+  UINT32 rx_queue_size_bytes =
+      device_params_.descriptor.rx_queue_size * sizeof(RxDescriptor);
+  if (rx_queue_size_bytes == 0 || rx_queue_size_bytes % PAGE_SIZE != 0) {
+    DEBUGP(GVNIC_ERROR,
+           "[%s] ERROR: Rx queues must be a multiple of the page size. The "
+           "device requested %d queue entries, each entry is %d bytes, and the "
+           "total requested queue size is %d bytes.",
+           __FUNCTION__, device_params_.descriptor.rx_queue_size,
+           sizeof(RxDescriptor), rx_queue_size_bytes);
+    NdisWriteErrorLogEntry(resources_->miniport_handle(),
+                           NDIS_ERROR_CODE_UNSUPPORTED_CONFIGURATION,
+                           /*NumberOfErrorValues=*/2, __LINE__,
+                           rx_queue_size_bytes);
+    return NDIS_STATUS_FAILURE;
+  }
+
+  tx_config_.tx.max_traffic_class =
       min(device_params_.max_tx_queues, kMaxTxTrafficClass);
   tx_config_.max_slices = static_cast<int>(GetSystemProcessorCount());
-  tx_config_.array_size = tx_config_.max_traffic_class * tx_config_.max_slices;
+  tx_config_.array_size =
+      tx_config_.tx.max_traffic_class * tx_config_.max_slices;
   tx_config_.max_queues =
       min(tx_config_.array_size, device_params_.max_tx_queues);
 
   tx_config_.num_queues = tx_config_.max_queues;
   tx_config_.num_slices =
       min(device_params_.descriptor.default_num_slices, tx_config_.max_slices);
-  tx_config_.num_traffic_class = kDefaultTxTrafficClassCount;
+  tx_config_.tx.num_traffic_class = kDefaultTxTrafficClassCount;
   tx_config_.num_descriptors = device_params_.descriptor.tx_queue_size;
   tx_config_.pages_per_queue_page_list =
       device_params_.descriptor.tx_pages_per_qpl;
@@ -249,18 +296,17 @@ void GvnicPciDevice::SetTransmitQueueConfig() {
          "[%s] TX slices %d, max slices %d, tcs %d, max tcs %d, array size %d, "
          "max queues %d, descriptor %d, pages per queue %d",
          __FUNCTION__, tx_config_.num_slices, tx_config_.max_slices,
-         tx_config_.num_traffic_class, tx_config_.max_traffic_class,
+         tx_config_.tx.num_traffic_class, tx_config_.tx.max_traffic_class,
          tx_config_.array_size, tx_config_.max_queues,
          tx_config_.num_descriptors, tx_config_.pages_per_queue_page_list);
 
   // Device pushes the number of rx traffic class to the driver. Code keeps both
   // max and number of traffic class to be same and const. User cannot adjust
   // this value later.
-  rx_config_.max_traffic_class = rx_config_.num_traffic_class =
-      device_params_.descriptor.num_rx_groups;
+  rx_config_.rx.num_groups = device_params_.descriptor.num_rx_groups;
   rx_config_.max_slices = min(device_params_.descriptor.default_num_slices,
                               static_cast<int>(GetSystemProcessorCount()));
-  rx_config_.array_size = rx_config_.max_traffic_class * rx_config_.max_slices;
+  rx_config_.array_size = rx_config_.rx.num_groups * rx_config_.max_slices;
   rx_config_.max_queues =
       min(rx_config_.array_size, device_params_.max_rx_queues);
 
@@ -275,12 +321,13 @@ void GvnicPciDevice::SetTransmitQueueConfig() {
   NT_ASSERT(rx_config_.pages_per_queue_page_list == rx_config_.num_descriptors);
 
   DEBUGP(GVNIC_INFO,
-         "[%s] RX slices %d, max slices %d, tcs %d, max tcs %d, array size %d, "
+         "[%s] RX slices %d, max slices %d, num groups %d, array size %d, "
          "max queues %d, descriptor %d, pages per queue %d",
          __FUNCTION__, rx_config_.num_slices, rx_config_.max_slices,
-         rx_config_.num_traffic_class, rx_config_.max_traffic_class,
-         rx_config_.array_size, rx_config_.max_queues,
+         rx_config_.rx.num_groups, rx_config_.array_size, rx_config_.max_queues,
          rx_config_.num_descriptors, rx_config_.pages_per_queue_page_list);
+
+  return NDIS_STATUS_SUCCESS;
 }
 
 NDIS_STATUS GvnicPciDevice::ConfigureDeviceResource() {
@@ -300,9 +347,8 @@ NDIS_STATUS GvnicPciDevice::ConfigureDeviceResource() {
            msi_table->MessageInfo[i].TargetProcessorSet);
   }
 
-  if (!notify_manager_.Init(resources_->miniport_handle(),
-                            msi_table->MessageCount, &tx_config_,
-                            &rx_config_)) {
+  if (!notify_manager_.Init(resources_->miniport_handle(), msi_table,
+                            &tx_config_, &rx_config_)) {
     return NDIS_STATUS_RESOURCES;
   }
 
@@ -339,15 +385,37 @@ void GvnicPciDevice::SendNetBufferLists(PNET_BUFFER_LIST net_buffer_list,
     // have different traffic class and should be handled in another tx ring.
     NET_BUFFER_LIST_NEXT_NBL(net_buffer_list) = nullptr;
 
-    tx_ring->SendBufferList(net_buffer_list, is_dpc_level);
+    if (tx_ring->IsAcceptingTraffic()) {
+      tx_ring->SendBufferList(net_buffer_list, is_dpc_level);
+    } else {
+      NET_BUFFER_LIST_STATUS(net_buffer_list) = stop_reason_;
+      NdisMSendNetBufferListsComplete(
+          resources_->miniport_handle(), net_buffer_list,
+          is_dpc_level ? NDIS_SEND_COMPLETE_FLAGS_DISPATCH_LEVEL : 0);
+    }
+
     net_buffer_list = next_net_buffer_list;
   }
 }
 
 NDIS_STATUS GvnicPciDevice::Pause() {
   PAGED_CODE();
-  NDIS_STATUS status = UnregisterRings();
 
+  PrepareRingsForRelease();
+
+  while (!IsSafeToReleaseRings()) {
+    DEBUGP(GVNIC_WARNING,
+           "[%s] WARNING: Rings are not ready for release, waiting %lu "
+           "microseconds.",
+           __FUNCTION__, kMicrosecondsBetweenPollingRingsForRelease);
+    NdisMSleep(kMicrosecondsBetweenPollingRingsForRelease);
+  }
+
+  // Mask all queue interrupts before detaching queues to prevent a DPC
+  // interrupt from touching soon to be invalid memory.
+  DisableQueueInterrupts();
+
+  NDIS_STATUS status = UnregisterRings();
   if (status != NDIS_STATUS_SUCCESS) {
     return status;
   }
@@ -371,12 +439,11 @@ NDIS_STATUS GvnicPciDevice::Restart() {
   if (status == NDIS_STATUS_SUCCESS) {
     SetLinkState(MediaConnectStateConnected);
     SetSliceTrafficClassToTxRingMapping();
+    EnableQueueInterrupts();
   }
 
   return status;
 }
-
-void GvnicPciDevice::Shutdown() {}
 
 void GvnicPciDevice::SurpriseRemove() {}
 
@@ -401,9 +468,16 @@ void GvnicPciDevice::HandleManagementQueueRequest() {
   }
 
   if (device_status & kDeviceStatusReset) {
-    DEBUGP(GVNIC_ERROR,
-           "[%s] ERROR: PCI hard reset from driver is not supported",
+#if NDIS_SUPPORT_NDIS630
+    DEBUGP(GVNIC_WARNING, "[%s] WARNING: Scheduling a device triggered reset.",
            __FUNCTION__);
+    NdisMResetMiniport(resources_->miniport_handle());
+#else
+    DEBUGP(
+        GVNIC_ERROR,
+        "[%s] ERROR: Device triggered resets are not supported pre-NDIS 6.30.",
+        __FUNCTION__);
+#endif  // NDIS_SUPPORT_NDIS630
   }
 }
 
@@ -420,23 +494,41 @@ NDIS_STATUS GvnicPciDevice::AllocateRings() {
   }
 
   // Allocate tx resources
-  tx_rings_ = AllocateMemory<TxRing>(resources_->miniport_handle(),
-                                     tx_config_.array_size);
-
-  if (!tx_rings_) {
-    DEBUGP(GVNIC_ERROR, "[%s] ERROR: Memory allocation failed for tx rings.",
+  tx_rings_ = AllocateMemory<TxRing*>(resources_->miniport_handle(),
+                                      tx_config_.array_size);
+  if (tx_rings_ == nullptr) {
+    DEBUGP(GVNIC_ERROR,
+           "[%s] ERROR: Memory allocation failed for tx ring pointer array.",
            __FUNCTION__);
     return NDIS_STATUS_RESOURCES;
   }
 
-  tx_queue_page_lists_ = AllocateMemory<QueuePageList>(
-      resources_->miniport_handle(), tx_config_.array_size);
+  for (UINT32 i = 0; i < tx_config_.array_size; i++) {
+    if (use_raw_addressing()) {
+      tx_rings_[i] = new(resources_->miniport_handle()) TxRingDma;
+    } else {
+      tx_rings_[i] = new(resources_->miniport_handle()) TxRingQpl;
+    }
 
-  if (!tx_queue_page_lists_) {
-    DEBUGP(GVNIC_ERROR,
-           "[%s] ERROR: Memory allocation failed for tx queue page list.",
-           __FUNCTION__);
-    return NDIS_STATUS_RESOURCES;
+    if (tx_rings_[i] == nullptr) {
+      DEBUGP(GVNIC_ERROR,
+             "[%s] ERROR: Memory allocation failed for tx ring %u of %u.",
+             __FUNCTION__, i, tx_config_.array_size);
+      return NDIS_STATUS_RESOURCES;
+    }
+  }
+
+  // Raw addressing doesn't use QPLs for Tx queues, only for Rx queues.
+  if (!use_raw_addressing()) {
+    tx_queue_page_lists_ = AllocateMemory<QueuePageList>(
+        resources_->miniport_handle(), tx_config_.array_size);
+
+    if (!tx_queue_page_lists_) {
+      DEBUGP(GVNIC_ERROR,
+             "[%s] ERROR: Memory allocation failed for tx queue page list.",
+             __FUNCTION__);
+      return NDIS_STATUS_RESOURCES;
+    }
   }
 
   if (!InitTxRings()) {
@@ -480,28 +572,36 @@ bool GvnicPciDevice::InitTxRings() {
   PAGED_CODE();
 
   UINT tx_ring_count = 0;
-  for (UINT tc = 0; tc < tx_config_.num_traffic_class; tc++) {
+  for (UINT tc = 0; tc < tx_config_.tx.num_traffic_class; tc++) {
     for (UINT slice = 0; slice < tx_config_.num_slices; slice++) {
       if (tx_ring_count == tx_config_.num_queues) {
         return true;
       }
 
       UINT tx_ring_id = RingBase::GetRingId(tx_config_.max_slices, slice, tc);
-      QueuePageList* tx_queue_page_list = &tx_queue_page_lists_[tx_ring_id];
+      if (use_raw_addressing()) {
+        TxRingDma* tx = static_cast<TxRingDma*>(tx_rings_[tx_ring_id]);
+        UINT notify_id = notify_manager_.RegisterTxRing(slice, tx);
+        if (!tx->Init(tx_ring_id, slice, tc, tx_config_.num_descriptors,
+                      notify_id, resources_, statistics_,
+                      counter_array_.virtual_address())) {
+          return false;
+        }
+      } else {
+        TxRingQpl* tx = static_cast<TxRingQpl*>(tx_rings_[tx_ring_id]);
+        QueuePageList* tx_queue_page_list = &tx_queue_page_lists_[tx_ring_id];
+        if (!tx_queue_page_list->Init(tx_ring_id,
+                                      tx_config_.pages_per_queue_page_list,
+                                      resources_->miniport_handle())) {
+          return false;
+        }
 
-      if (!tx_queue_page_list->Init(tx_ring_id,
-                                    tx_config_.pages_per_queue_page_list,
-                                    resources_->miniport_handle())) {
-        return false;
-      }
-
-      TxRing* tx = &tx_rings_[tx_ring_id];
-
-      UINT notify_id = notify_manager_.RegisterTxRing(slice, tx);
-      if (!tx->Init(tx_ring_id, slice, tc, tx_config_.num_descriptors,
-                    tx_queue_page_list, notify_id, resources_, statistics_,
-                    counter_array_.virtual_address())) {
-        return false;
+        UINT notify_id = notify_manager_.RegisterTxRing(slice, tx);
+        if (!tx->Init(tx_ring_id, slice, tc, tx_config_.num_descriptors,
+                      tx_queue_page_list, notify_id, resources_, statistics_,
+                      counter_array_.virtual_address())) {
+          return false;
+        }
       }
 
       tx_ring_count++;
@@ -515,16 +615,20 @@ bool GvnicPciDevice::InitRxRings() {
   PAGED_CODE();
 
   UINT rx_ring_count = 0;
-  for (UINT tc = 0; tc < rx_config_.num_traffic_class; tc++) {
+  for (UINT group = 0; group < rx_config_.rx.num_groups; group++) {
     for (UINT slice = 0; slice < rx_config_.num_slices; slice++) {
       if (rx_ring_count == rx_config_.num_queues) {
         return true;
       }
 
-      UINT rx_ring_id = RingBase::GetRingId(rx_config_.max_slices, slice, tc);
+      UINT rx_ring_id =
+          RingBase::GetRingId(rx_config_.max_slices, slice, group);
       QueuePageList* rx_queue_page_list = &rx_queue_page_lists_[rx_ring_id];
 
-      if (!rx_queue_page_list->Init(rx_ring_id | kRxQueuePageListIdMask,
+      UINT queue_page_list_id = use_raw_addressing()
+                                    ? kRawAddressingPageListId
+                                    : (rx_ring_id | kRxQueuePageListIdMask);
+      if (!rx_queue_page_list->Init(queue_page_list_id,
                                     rx_config_.pages_per_queue_page_list,
                                     resources_->miniport_handle())) {
         return false;
@@ -533,8 +637,9 @@ bool GvnicPciDevice::InitRxRings() {
       RxRing* rx = &rx_rings_[rx_ring_id];
       UINT notify_id = notify_manager_.RegisterRxRing(slice, rx);
 
-      if (!rx->Init(rx_ring_id, slice, tc, rx_config_.num_descriptors,
-                    rx_queue_page_list, notify_id, resources_, statistics_,
+      if (!rx->Init(rx_ring_id, slice, group, rx_config_.num_descriptors,
+                    use_raw_addressing(), rx_queue_page_list, notify_id,
+                    max_packet_size().max_data_size, resources_, statistics_,
                     counter_array_.virtual_address())) {
         return false;
       }
@@ -554,7 +659,11 @@ void GvnicPciDevice::FreeRings() {
 
   if (tx_rings_ != nullptr) {
     for (UINT32 i = 0; i < tx_config_.array_size; i++) {
-      tx_rings_[i].Release();
+      if (tx_rings_[i] != nullptr) {
+        tx_rings_[i]->Release();
+        FreeMemory(tx_rings_[i]);
+        tx_rings_[i] = nullptr;
+      }
     }
     FreeMemory(tx_rings_);
     tx_rings_ = nullptr;
@@ -596,18 +705,20 @@ NDIS_STATUS GvnicPciDevice::RegisterRings() {
 
   NDIS_STATUS status = NDIS_STATUS_SUCCESS;
   for (UINT32 i = 0; i < tx_config_.array_size; i++) {
-    if (!tx_rings_[i].is_init()) {
+    if (!tx_rings_[i]->is_init()) {
       continue;
     }
 
-    status = admin_queue_.RegisterPageList(*tx_rings_[i].queue_page_list(),
-                                           resources_->miniport_handle());
+    if (!use_raw_addressing()) {
+      status = admin_queue_.RegisterPageList(*tx_rings_[i]->queue_page_list(),
+                                             resources_->miniport_handle());
 
-    if (status != NDIS_STATUS_SUCCESS) {
-      return status;
+      if (status != NDIS_STATUS_SUCCESS) {
+        return status;
+      }
     }
 
-    status = admin_queue_.CreateTransmitQueue(tx_rings_[i]);
+    status = admin_queue_.CreateTransmitQueue(*tx_rings_[i]);
 
     if (status != NDIS_STATUS_SUCCESS) {
       return status;
@@ -619,11 +730,13 @@ NDIS_STATUS GvnicPciDevice::RegisterRings() {
       continue;
     }
 
-    status = admin_queue_.RegisterPageList(*rx_rings_[i].queue_page_list(),
-                                           resources_->miniport_handle());
+    if (!use_raw_addressing()) {
+      status = admin_queue_.RegisterPageList(*rx_rings_[i].queue_page_list(),
+                                             resources_->miniport_handle());
 
-    if (status != NDIS_STATUS_SUCCESS) {
-      return status;
+      if (status != NDIS_STATUS_SUCCESS) {
+        return status;
+      }
     }
 
     status = admin_queue_.CreateReceiveQueue(rx_rings_[i]);
@@ -647,20 +760,23 @@ NDIS_STATUS GvnicPciDevice::UnregisterRings() {
   // DestoryTransmit/ReceiveQueue first and then UnregisterPageList.
   if (tx_rings_ != nullptr) {
     for (UINT32 i = 0; i < tx_config_.array_size; i++) {
-      if (!tx_rings_[i].is_init()) {
+      if (tx_rings_[i] == nullptr || !tx_rings_[i]->is_init()) {
         continue;
       }
 
-      status = admin_queue_.DestroyTransmitQueue(tx_rings_[i]);
+      status = admin_queue_.DestroyTransmitQueue(*tx_rings_[i]);
 
       if (status != NDIS_STATUS_SUCCESS) {
         return status;
       }
 
-      status = admin_queue_.UnregisterPageList(*tx_rings_[i].queue_page_list());
+      if (!use_raw_addressing()) {
+        status =
+            admin_queue_.UnregisterPageList(*tx_rings_[i]->queue_page_list());
 
-      if (status != NDIS_STATUS_SUCCESS) {
-        return status;
+        if (status != NDIS_STATUS_SUCCESS) {
+          return status;
+        }
       }
     }
   }
@@ -677,10 +793,13 @@ NDIS_STATUS GvnicPciDevice::UnregisterRings() {
         return status;
       }
 
-      status = admin_queue_.UnregisterPageList(*rx_rings_[i].queue_page_list());
+      if (!use_raw_addressing()) {
+        status =
+            admin_queue_.UnregisterPageList(*rx_rings_[i].queue_page_list());
 
-      if (status != NDIS_STATUS_SUCCESS) {
-        return status;
+        if (status != NDIS_STATUS_SUCCESS) {
+          return status;
+        }
       }
     }
   }
@@ -731,7 +850,7 @@ void GvnicPciDevice::SetSliceTrafficClassToTxRingMapping() {
   UINT32 valid_tx_ring_count = 0;
   UINT32 valid_tx_ring_pointer = 0;
   for (UINT32 i = 0; i < tx_config_.max_slices; i++) {
-    if (tx_rings_[i].is_init()) {
+    if (tx_rings_[i] != nullptr && tx_rings_[i]->is_init()) {
       valid_tx_ring_count++;
     } else {
       if (valid_tx_ring_pointer == valid_tx_ring_count) {
@@ -744,10 +863,10 @@ void GvnicPciDevice::SetSliceTrafficClassToTxRingMapping() {
   // Step 2. Populate the rest of the traffic class.
   // Recall both tx_rings_ and slice_tc_to_tx_ring_map_ can be viewed as a 2d
   // array with max_traffic_class rows and max_clices column.
-  for (UINT32 tc = 1; tc < tx_config_.max_traffic_class; tc++) {
+  for (UINT32 tc = 1; tc < tx_config_.tx.max_traffic_class; tc++) {
     for (UINT32 slice = 0; slice < tx_config_.max_slices; slice++) {
       UINT32 array_idx = tc * tx_config_.max_slices + slice;
-      if (tx_rings_[array_idx].is_init()) {
+      if (tx_rings_[array_idx] != nullptr && tx_rings_[array_idx]->is_init()) {
         slice_tc_to_tx_ring_map_[array_idx] = array_idx;
       } else {
         // Copy the tx_ring from previous tc with same slice.
@@ -759,13 +878,13 @@ void GvnicPciDevice::SetSliceTrafficClassToTxRingMapping() {
 
   DumpProcTrafficClassToTxRingMapping(slice_tc_to_tx_ring_map_,
                                       tx_config_.max_slices,
-                                      tx_config_.max_traffic_class);
+                                      tx_config_.tx.max_traffic_class);
 }
 
 TxRing* GvnicPciDevice::GetTxRing(UINT32 slice, UINT32 traffic_class) {
   UINT32 array_idx = traffic_class * tx_config_.max_slices + slice;
   UINT32 ring_idx = slice_tc_to_tx_ring_map_[array_idx];
-  return &tx_rings_[ring_idx];
+  return tx_rings_[ring_idx];
 }
 
 void GvnicPciDevice::SetLinkState(NDIS_MEDIA_CONNECT_STATE new_state) {
@@ -851,7 +970,7 @@ void GvnicPciDevice::UpdateTxPacketHeaderLength(
   eth_header_len_ = eth_header_len;
   if (tx_rings_ != nullptr) {
     for (UINT32 i = 0; i < tx_config_.array_size; i++) {
-      tx_rings_[i].SetPacketHeaderLength(eth_header_len_);
+      tx_rings_[i]->SetPacketHeaderLength(eth_header_len_);
     }
   }
 
@@ -881,7 +1000,7 @@ NDIS_STATUS GvnicPciDevice::UpdateRssParameters(
 
   RSSConfiguration new_rss_config = rss_config_;
   NDIS_STATUS status = new_rss_config.ApplyReceiveScaleParameters(
-      rss_params, param_length, num_byte_read);
+      rss_params, param_length, rx_config_.num_slices, num_byte_read);
   if (status != NDIS_STATUS_SUCCESS) {
     return status;
   }
@@ -897,10 +1016,101 @@ NDIS_STATUS GvnicPciDevice::UpdateRssParameters(
     DEBUGP(GVNIC_INFO, "[%s] rss setting updated.", __FUNCTION__);
     rss_config_ = new_rss_config;
     UpdateRxRssConfig();
+    notify_manager_.UpdateRxProcessorAffinities(rss_config_);
   }
 
   DEBUGP(GVNIC_INFO, "[%s] Current rss setting:", __FUNCTION__);
   rss_config_.DumpSettings();
 
   return status;
+}
+
+void GvnicPciDevice::DisableQueueInterrupts() {
+  for (UINT32 i = notify_manager_.notify_block_msi_base_index();
+       i < notify_manager_.manager_queue_message_id(); i++) {
+    KeMemoryBarrier();
+    resources_->WriteDoorbell(notify_manager_.GetInterruptDoorbellIndex(i),
+                              kInterruptRequestMask);
+  }
+
+  queue_interrupts_enabled_ = false;
+
+  // Take and release each DPC spinlock to ensure that all in-process DPC
+  // interrupts have finished, and that new DPC interrupts will respect the
+  // queue_interrupts_enabled_ flag.
+  for (UINT32 notify_id = notify_manager()->notify_block_msi_base_index();
+       notify_id < notify_manager()->manager_queue_message_id(); notify_id++) {
+    NdisMSynchronizeWithInterruptEx(
+        resources_->interrupt_handle(), notify_id,
+        [](NDIS_HANDLE) -> BOOLEAN { return TRUE; },
+        /*SynchronizeContext=*/nullptr);
+  }
+}
+
+void GvnicPciDevice::EnableQueueInterrupts() {
+  queue_interrupts_enabled_ = true;
+
+  for (UINT32 i = notify_manager_.notify_block_msi_base_index();
+       i < notify_manager_.manager_queue_message_id(); i++) {
+    KeMemoryBarrier();
+    resources_->WriteDoorbell(notify_manager_.GetInterruptDoorbellIndex(i),
+                              kInterruptRequestACK | kInterruptRequestEvent);
+  }
+}
+
+NDIS_STATUS GvnicPciDevice::BeginTransitionToFullPowerState() {
+  // Paused is the default reason we fail traffic when queues are stopped.
+  stop_reason_ = NDIS_STATUS_PAUSED;
+
+  NDIS_STATUS status = admin_queue_.Init(resources_);
+  if (status != NDIS_STATUS_SUCCESS) {
+    return status;
+  }
+
+  status = admin_queue_.ConfigureDeviceResource(
+      counter_array_.physical_address().QuadPart,
+      device_params_.descriptor.event_counters,
+      notify_manager_.notify_blocks_physical_address(),
+      notify_manager_.num_notify_blocks(), sizeof(NotifyBlock),
+      notify_manager_.notify_block_msi_base_index());
+  if (status != NDIS_STATUS_SUCCESS) {
+    return status;
+  }
+
+  return admin_queue_.SetRssParameters(rss_config_);
+}
+
+NDIS_STATUS GvnicPciDevice::FinishTransitionToLowPowerState() {
+  stop_reason_ = NDIS_STATUS_LOW_POWER_STATE;
+
+  admin_queue_.DeconfigureDeviceResource();
+  admin_queue_.Release();
+
+  return NDIS_STATUS_SUCCESS;
+}
+
+void GvnicPciDevice::PrepareRingsForRelease() {
+  if (tx_rings_ != nullptr) {
+    for (UINT32 i = 0; i < tx_config_.array_size; i++) {
+      if (tx_rings_[i] != nullptr) {
+        tx_rings_[i]->SynchronousPrepareForRelease();
+      }
+    }
+  }
+
+  if (rx_rings_ != nullptr) {
+    for (UINT32 i = 0; i < rx_config_.array_size; i++) {
+      rx_rings_[i].SynchronousPrepareForRelease();
+    }
+  }
+}
+
+bool GvnicPciDevice::IsSafeToReleaseRings() const {
+  for (UINT32 i = 0; i < rx_config_.array_size; i++) {
+    if (!rx_rings_[i].IsSafeToRelease()) {
+      return false;
+    }
+  }
+
+  return true;
 }

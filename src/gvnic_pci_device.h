@@ -16,6 +16,7 @@
 
 #ifndef GVNIC_PCI_DEVICE_H_
 #define GVNIC_PCI_DEVICE_H_
+
 #include <ndis.h>
 
 #include "adapter_configuration.h"  // NOLINT: include directory
@@ -30,7 +31,8 @@
 #include "rss_configuration.h"      // NOLINT: include directory
 #include "rx_ring.h"                // NOLINT: include directory
 #include "shared_memory.h"          // NOLINT: include directory
-#include "tx_ring.h"                // NOLINT: include directory
+#include "tx_ring_dma.h"            // NOLINT: include directory
+#include "tx_ring_qpl.h"            // NOLINT: include directory
 
 constexpr ULONGLONG kOneHundredGigabit = 100ull * 1000 * 1000 * 1000;
 
@@ -41,13 +43,17 @@ class GvnicPciDevice final {
       : resources_(nullptr),
         device_params_(),
         ignore_flow_table_(false),
+        allow_raw_addressing_from_registry_(false),
+        slice_tc_to_tx_ring_map_(nullptr),
         tx_rings_(nullptr),
-        rx_rings_(nullptr),
         tx_queue_page_lists_(nullptr),
+        rx_rings_(nullptr),
         rx_queue_page_lists_(nullptr),
+        queue_interrupts_enabled_(false),
         connect_state_(MediaConnectStateDisconnected),
         packet_filter_(0),
-        rx_checksum_enabled_(false) {}
+        rx_checksum_enabled_(false),
+        stop_reason_(0) {}
   ~GvnicPciDevice();
 
   // Not copyable or movable
@@ -80,7 +86,6 @@ class GvnicPciDevice final {
   // Report connect state MediaConnectStateConnected if succeed.
   NDIS_STATUS Restart();
 
-  void Shutdown();
   void SurpriseRemove();
   void HandleManagementQueueRequest();
 
@@ -98,6 +103,10 @@ class GvnicPciDevice final {
   // num_slices matches kernel's view of receive queue.
   UINT32 num_rss_queue() const { return rx_config_.num_slices; }
   UINT32 packet_filter() const { return packet_filter_; }
+  bool use_raw_addressing() const {
+    return device_params_.support_raw_addressing &&
+           allow_raw_addressing_from_registry_;
+  }
   // Update the current packet filter flags for this device.
   void set_packet_filter(UINT32 new_packet_filter);
   NDIS_OFFLOAD hardware_offload_capabilities() const {
@@ -111,6 +120,7 @@ class GvnicPciDevice final {
     return false;
 #endif
   }
+  bool QueueInterruptsEnabled() const { return queue_interrupts_enabled_; }
 
   // Update offload config based on NDIS_OFFLOAD_ENCAPSULATION.
   // Return NDIS_STATUS_INVALID_PARAMETER if the request is not valid.
@@ -128,6 +138,14 @@ class GvnicPciDevice final {
       const NDIS_RECEIVE_SCALE_PARAMETERS* rss_params, UINT32 param_length,
       UINT32* num_byte_read);
 
+  // Called before the framework calls GvnicRestart when entering D0.
+  // Reinitializes the admin queue with the existing settings.
+  NDIS_STATUS BeginTransitionToFullPowerState();
+
+  // Called after the framework calls GvnicPause when leaving D0. Deconfigures
+  // and releases the admin queue.
+  NDIS_STATUS FinishTransitionToLowPowerState();
+
  private:
   // Load registry configurations.
   NDIS_STATUS LoadAdapterConfiguration(
@@ -139,8 +157,9 @@ class GvnicPciDevice final {
   // Allocate required resource for device and register it with device.
   NDIS_STATUS ConfigureDeviceResource();
 
-  // Set basic tx/rx queue configurations.
-  void SetTransmitQueueConfig();
+  // Validates and sets basic tx/rx queue configurations. This writes to the
+  // system I/O error log file if the queue config is invalid.
+  NDIS_STATUS SetTransmitQueueConfig();
 
   // Set driver version to device.
   void SetDriverInfo();
@@ -181,6 +200,22 @@ class GvnicPciDevice final {
   // Get tx ring index for handling request based on slice and traffic_class.
   TxRing* GetTxRing(UINT32 slice, UINT32 traffic_class);
 
+  // Allows enabling and disabling the queue interrupts. This is done in
+  // addition to masking the interrupts when the interrupt would touch
+  // invalid memory.
+  void DisableQueueInterrupts();
+  void EnableQueueInterrupts();
+
+  // Prepares each ring to be released. Rx rings will stop processing packets
+  // asynchronously, and Tx rings will stop accepting traffic and begin to
+  // drain.
+  void PrepareRingsForRelease();
+
+  // Rings can be detached from the device before this, but rx rings must not
+  // be freed until all net buffer lists handled asynchronously have been
+  // completed.
+  bool IsSafeToReleaseRings() const;
+
   AdapterResources* resources_;
   AdapterStatistics* statistics_;
 
@@ -195,6 +230,11 @@ class GvnicPciDevice final {
   // traffic into Traffic Class 0.
   bool ignore_flow_table_;
 
+  // Whether raw addressing is allowed via the registry. By default raw
+  // addressing is allowed, but the device must also report it as enabled for
+  // it to be used.
+  bool allow_raw_addressing_from_registry_;
+
   // Array for storing counters of the total number of package processed by NIC.
   // Based on device contact, it is an array of UINT32 and the length is based
   // on device_params_.descriptor.event_counters.
@@ -205,11 +245,8 @@ class GvnicPciDevice final {
   // Map between processor index(slice), traffic_class to tx ring index.
   UINT32* slice_tc_to_tx_ring_map_;
 
-  // Set of flags indicating filters
-  UINT32 packet_filter_;
-
   QueueConfig tx_config_;
-  TxRing* tx_rings_;                    // Size of tx_config_.array_size
+  TxRing** tx_rings_;                   // Size of tx_config_.array_size
   QueuePageList* tx_queue_page_lists_;  // Size of tx_config_.max_queues
 
   QueueConfig rx_config_;
@@ -219,7 +256,12 @@ class GvnicPciDevice final {
   NDIS_OFFLOAD hardware_offload_capabilities_;
   NDIS_OFFLOAD offload_configuration_;
 
+  bool queue_interrupts_enabled_;
+
   NDIS_MEDIA_CONNECT_STATE connect_state_;
+
+  // Set of flags indicating filters
+  UINT32 packet_filter_;
 
   NDIS_SPIN_LOCK eth_header_len_spin_lock_;
   EthHeaderLength eth_header_len_;
@@ -229,6 +271,8 @@ class GvnicPciDevice final {
 
   NDIS_SPIN_LOCK rss_config_spin_lock_;
   RSSConfiguration rss_config_;
+
+  NDIS_STATUS stop_reason_;
 };
 
 #endif  // GVNIC_PCI_DEVICE_H_

@@ -23,12 +23,6 @@ constexpr int kGvnicBarCount = 3;
 constexpr int kConfigStatusRegister = 0;
 constexpr int kDoorbellRegister = 2;
 
-// Tag used for memory allocation.
-// Per NDIS doc, it is defined as a string, delimited by single quotation marks,
-// with up to four characters, specified in reversed order. Function consume it
-// as ULONG type.
-constexpr ULONG kGvnicMemoryTag = 'mNVG';  // Gvnic Memory.
-
 struct BaseAddressRegister {
   PHYSICAL_ADDRESS start;
   ULONG length;
@@ -46,7 +40,8 @@ class AdapterResources final {
         miniport_handle_(nullptr),
         dma_handle_(nullptr),
         interrupt_handle_(nullptr),
-        buffer_list_pool_(nullptr) {}
+        buffer_list_pool_(nullptr),
+        recommended_sg_list_size_(0) {}
   ~AdapterResources();
 
   // Not copyable or movable
@@ -71,6 +66,10 @@ class AdapterResources final {
 
   NDIS_HANDLE interrupt_handle() const { return interrupt_handle_; }
 
+  NDIS_HANDLE dma_handle() const { return dma_handle_; }
+
+  ULONG recommended_sg_list_size() const { return recommended_sg_list_size_; }
+
   IO_INTERRUPT_MESSAGE_INFO* msi_info_table() const { return msi_info_table_; }
 
   // Write value into kDoorbellRegister register.
@@ -78,6 +77,9 @@ class AdapterResources final {
 
   // Release all registered handlers.
   void Release();
+
+  // Completes all running interrupts and prevents new ones.
+  void DeregisterInterrupts();
 
  private:
   // Help function to translate offset to mapped memory address.
@@ -87,6 +89,7 @@ class AdapterResources final {
 
   NDIS_STATUS AllocateNetBufferListPool();
   NDIS_STATUS RegisterDma();
+  ULONG GetDmaRegistrationFlags();
   NDIS_STATUS RegisterInterrupt(PVOID adapter_context);
 
   NDIS_HANDLE driver_handle_;
@@ -96,6 +99,10 @@ class AdapterResources final {
   NDIS_HANDLE interrupt_handle_;
   NDIS_HANDLE buffer_list_pool_;
   BaseAddressRegister bars_[kGvnicBarCount];
+
+  // The length in bytes that the NDIS framework recommends is preallocated for
+  // each scatter gather list.
+  ULONG recommended_sg_list_size_;
 
   IO_INTERRUPT_MESSAGE_INFO* msi_info_table_;
 };

@@ -27,12 +27,14 @@
 __declspec(align(kCacheLineSize)) class RingBase {
  public:
   RingBase()
-      : queue_page_list_(nullptr),
+      : is_init_(0),
         id_(0),
         slice_(0),
         traffic_class_(0),
         notify_id_(0),
-        is_init_(false) {}
+        use_raw_addressing_(false),
+        queue_page_list_(nullptr),
+        is_prepare_for_release_(false) {}
   ~RingBase();
 
   // Return the ring id based on slice and traffic class number.
@@ -59,8 +61,11 @@ __declspec(align(kCacheLineSize)) class RingBase {
   //    id: unique id of the ring
   //    slice: slice number of the ring.
   //    traffic_class: traffic_class for the ring.
+  //    use_raw_addressing: whether to use raw physical address or offset from
+  //      queue_page_list.
   //    queue_page_list: list of pages registered with the device. Net packets
-  //      need to be copied into these pages for the device to send out.
+  //      need to be copied into these pages for the device to send out. This
+  //      will be nullptr for tx rings when use_raw_addressing is set.
   //    notify_id: the index of the ring in the NotificationBlock
   //    adapter_resource: pointer to the resource object, required for accessing
   //      doorbells and miniport handle.
@@ -73,8 +78,9 @@ __declspec(align(kCacheLineSize)) class RingBase {
   //  Return:
   //    true if allocation succeeds or false otherwise.
   bool Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
-            QueuePageList* queue_page_list, UINT32 notify_id,
-            AdapterResources* adapter_resource, AdapterStatistics* statistics,
+            bool use_raw_addressing, QueuePageList* queue_page_list,
+            UINT32 notify_id, AdapterResources* adapter_resource,
+            AdapterStatistics* statistics,
             const DeviceCounter* device_counters);
 
   // Release queue resources.
@@ -91,7 +97,18 @@ __declspec(align(kCacheLineSize)) class RingBase {
   UINT32 notify_id() const { return notify_id_; }
 
   // Whether the ring has been initialized.
-  bool is_init() const { return is_init_; }
+  bool is_init() const { return !!is_init_; }
+
+  bool use_raw_addressing() const { return use_raw_addressing_; }
+
+  // This function calls PrepareForRelease, but synchronized with any DPC
+  // interrupt on the same notify block. This prevents us from changing the
+  // ring state during an interrupt.
+  void SynchronousPrepareForRelease();
+
+  // Called by SynchronousPrepareForRelease's interrupt synchronized callback.
+  // This is invoked at dispatch level.
+  void PrepareForRelease() { is_prepare_for_release_ = true; }
 
  protected:
   // Write value to ring doorbell.
@@ -108,7 +125,20 @@ __declspec(align(kCacheLineSize)) class RingBase {
     return adapter_resource_->net_buffer_list_pool();
   }
 
+  NDIS_HANDLE dma_handle() const { return adapter_resource_->dma_handle(); }
+
+  ULONG recommended_sg_list_size() const {
+    return adapter_resource_->recommended_sg_list_size();
+  }
+
   AdapterStatistics* statistics() { return adapter_statistics_; }
+
+  // Atomically invalidates this ring, and returns TRUE if this ring was
+  // initialized before invalidation. The thread calling Invalidate should
+  // also call Release.
+  bool Invalidate();
+
+  bool IsPrepareForRelease() const { return is_prepare_for_release_; }
 
  private:
   // Doorbell index could be updated by device and need to read it refresh.
@@ -118,7 +148,7 @@ __declspec(align(kCacheLineSize)) class RingBase {
   UINT32 GetDeviceCounterIndex() const;
 
   // check whether the ring is initialized.
-  bool is_init_;
+  LONG is_init_;
 
   UINT32 id_;
   UINT32 slice_;
@@ -131,7 +161,15 @@ __declspec(align(kCacheLineSize)) class RingBase {
   const DeviceCounter* device_counters_;
 
   SharedMemory<QueueResources> resources_;
+
+  // Whether to use raw physical address or offset from the queue page list.
+  bool use_raw_addressing_;
   QueuePageList* queue_page_list_;
+
+  // Whether this ring is being readied to be released. Rx rings will stop
+  // processing packets asynchronously, and Tx rings will stop accepting
+  // traffic and begin to drain.
+  bool is_prepare_for_release_;
 };
 
 #endif  // RING_BASE_H_

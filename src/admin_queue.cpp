@@ -38,6 +38,16 @@ constexpr ULONG kDeviceResetPfn = 0x0;
 // Max retries for checking for command_id status.
 constexpr int kMaxAdminQueueEventCounterCheck = 100;
 
+constexpr ULONG kMicrosecondsBetweenPollingAQForRelease = 1000000;  // 1s.
+
+bool IsSafeToReleaseAQ(const AdapterResources& resources) {
+  ULONG page_frame_number;
+  resources.ReadRegister(kConfigStatusRegister,
+                         FIELD_OFFSET(GvnicDeviceConfig, admin_queue_pfn),
+                         &page_frame_number);
+  return page_frame_number == kDeviceResetPfn;
+}
+
 }  // namespace
 
 NDIS_STATUS AdminQueue::Init(AdapterResources* resources) {
@@ -64,12 +74,30 @@ NDIS_STATUS AdminQueue::Init(AdapterResources* resources) {
 
 void AdminQueue::Reset() {
   PAGED_CODE();
+  if (resources_ == nullptr) {
+    return;
+  }
+
   resources_->WriteRegister(kConfigStatusRegister,
                             FIELD_OFFSET(GvnicDeviceConfig, admin_queue_pfn),
                             RtlUlongByteSwap(kDeviceResetPfn));
+
+  KeMemoryBarrier();
+  while (!IsSafeToReleaseAQ(*resources_)) {
+    // If this is reached, the device is unrecoverable but still holding a
+    // reference to driver owned memory. When the device has released the
+    // memory, it will write kDeviceResetPfn back to the AQ PFN register.
+    DEBUGP(GVNIC_ERROR,
+           "[%s] ERROR: Device has encountered an unrecoverable error but may "
+           "still access shared memory. Waiting %lu microseconds until making "
+           "another attempt to release admin queue resources.",
+           __FUNCTION__, kMicrosecondsBetweenPollingAQForRelease);
+    NdisMSleep(kMicrosecondsBetweenPollingAQForRelease);
+  }
 }
 
-NDIS_STATUS AdminQueue::DescribeDevice(DeviceDescriptor* descriptor) {
+NDIS_STATUS AdminQueue::DescribeDevice(DeviceDescriptor* descriptor,
+                                       bool* support_raw_addressing) {
   PAGED_CODE();
 
   AdminQueueCommandEntry command_entry;
@@ -116,14 +144,30 @@ NDIS_STATUS AdminQueue::DescribeDevice(DeviceDescriptor* descriptor) {
       RtlUshortByteSwap(gvnic_desc->tx_pages_per_qpl);
   NdisMoveMemory(descriptor->mac, gvnic_desc->mac, sizeof(descriptor->mac));
 
+  UINT16 num_device_option = RtlUshortByteSwap(gvnic_desc->num_device_options);
+
+  for (int i = 0; i < num_device_option; i++) {
+    UINT16 option_id =
+        RtlUshortByteSwap(gvnic_desc->device_option[i].option_id);
+    switch (option_id) {
+      case kSupportsRawAddressing:
+        *support_raw_addressing = true;
+        break;
+      default:
+        DEBUGP(GVNIC_ERROR, "Unrecognized device option id - %u", option_id);
+    }
+  }
+
   DEBUGP(GVNIC_INFO,
          "Get descriptor from device: num_rx_group - %u, tx_queue_size - %u, "
          "rx_queue_size - %u, max_registered_pages - %llu, mtu - %u, "
-         "event_counters - %u, default_num_slices - %u",
+         "event_counters - %u, default_num_slices - %u, num_device_option - "
+         "%u, support_raw_addressing - %u",
          descriptor->num_rx_groups, descriptor->tx_queue_size,
          descriptor->rx_queue_size, descriptor->max_registered_pages,
          descriptor->mtu, descriptor->event_counters,
-         descriptor->default_num_slices);
+         descriptor->default_num_slices, num_device_option,
+         *support_raw_addressing);
 
   LogMacAddress("Mac from device", descriptor->mac);
 
@@ -238,8 +282,17 @@ NDIS_STATUS AdminQueue::UnregisterPageList(const QueuePageList& page_list) {
 NDIS_STATUS AdminQueue::CreateTransmitQueue(const TxRing& tx_ring) {
   PAGED_CODE();
 
-  // PageList must be assigned to tx ring.
-  NT_ASSERT(tx_ring.queue_page_list() != nullptr);
+  UINT32 queue_page_list_id;
+  if (tx_ring.use_raw_addressing()) {
+    queue_page_list_id = kRawAddressingPageListId;
+  } else {
+    // The tx ring requires an initialized QPL if it's not using raw addressing.
+    if (tx_ring.queue_page_list() == nullptr) {
+      NT_ASSERT(tx_ring.queue_page_list() != nullptr);
+      return NDIS_STATUS_FAILURE;
+    }
+    queue_page_list_id = tx_ring.queue_page_list()->id();
+  }
 
   AdminQueueCommandEntry command_entry;
   NDIS_STATUS status = CreateCommand(&command_entry);
@@ -258,14 +311,14 @@ NDIS_STATUS AdminQueue::CreateTransmitQueue(const TxRing& tx_ring) {
       RtlUlonglongByteSwap(tx_ring.ResourcesPhysicalAddress().QuadPart),
       /*.tx_ring_addr=*/
       RtlUlonglongByteSwap(tx_ring.descriptor_ring_physical_address().QuadPart),
-      /*.queue_page_list_id=*/RtlUlongByteSwap(tx_ring.queue_page_list()->id()),
+      /*.queue_page_list_id=*/RtlUlongByteSwap(queue_page_list_id),
       /*.notify_blk_id=*/RtlUlongByteSwap(tx_ring.notify_id())};
 
   DEBUGP(GVNIC_VERBOSE,
          "[%s] CreateTransmitQueue: id - %u, tc - %u, page_list_id - %u, "
          "notify_id - %u",
          __FUNCTION__, tx_ring.id(), tx_ring.traffic_class(),
-         tx_ring.queue_page_list()->id(), tx_ring.notify_id());
+         queue_page_list_id, tx_ring.notify_id());
 
   return ExecuteCommand(command_entry);
 }
@@ -426,10 +479,17 @@ void AdminQueue::Release() {
 
   Reset();
   command_ring_.Release();
+
+  commands_created_ = 0;
+  commands_completed_ = 0;
 }
 
 NDIS_STATUS AdminQueue::CreateCommand(AdminQueueCommandEntry* command_entry) {
   PAGED_CODE();
+
+  if (!command_ring_) {
+    return NDIS_STATUS_RESOURCES;
+  }
 
   command_entry->command_id =
       InterlockedIncrement(reinterpret_cast<LONG*>(&commands_created_));

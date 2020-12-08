@@ -35,6 +35,8 @@ __declspec(align(kCacheLineSize)) struct RxRingEntry {
   RxDataRingSlot* data;
   // Count for number of pending packets inside this slot.
   INT16 pending_count;
+  // Count for number of pending packets inside this ring.
+  INT16* ring_pending_count;
   // Raw address of for the packet.
   void* packet_addr[2];
   // Eth header address.

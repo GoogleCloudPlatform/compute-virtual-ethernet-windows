@@ -40,9 +40,6 @@ constexpr UINT kEthIpv4TcpHeaderTotalLength = 54;
 // 20 (IP_header) + 20(TCP_header)
 constexpr UINT kIpv4TcpHeaderTotalLength = 40;
 
-// Max TCP IP packet size.
-constexpr UINT kMaxPacketSize = MAXUINT16;
-
 constexpr UINT kAcceptableTcpFlagMask = (kTcpFlagACK | kTcpFlagPSH);
 
 // This assumes no option fields in both ip and tcp header.
@@ -66,7 +63,7 @@ bool IsHeaderValid(const RxPacket& rx_packet) {
   }
 
   // Require no option fields in TCP header.
-  // TODO: allow TCP timestamp option.
+  // TODO(b/140896200): Allow TCP timestamp option.
   const TcpHeader* tcp_header = rx_packet.tcp_header();
   if (!(tcp_header->data_offset == kTcpHeaderNoOptionDataOffset)) {
     return false;
@@ -86,7 +83,7 @@ bool IsHeaderValid(const RxPacket& rx_packet) {
   }
 
   // The packet needs to have payload.
-  // TODO: allow pure ack packets.
+  // TODO(b/174526031): Support pure ACK packet coalescing.
   if (rx_packet.packet_length() == kEthIpv4TcpHeaderTotalLength) {
     return false;
   }
@@ -314,6 +311,9 @@ NET_BUFFER_LIST* PacketAssembler::AllocateNewNBL(
 
   NET_BUFFER_LIST* net_buffer_list = rx_packet->net_buffer_list();
   NET_BUFFER* net_buffer = NET_BUFFER_LIST_FIRST_NB(net_buffer_list);
+
+  NT_ASSERT(NET_BUFFER_FIRST_MDL(net_buffer) == nullptr);
+  NT_ASSERT(NET_BUFFER_CURRENT_MDL(net_buffer) == nullptr);
 
   NET_BUFFER_FIRST_MDL(net_buffer) = mdl;
   NET_BUFFER_DATA_LENGTH(net_buffer) = rx_packet->packet_length();

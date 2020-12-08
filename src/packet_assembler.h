@@ -156,14 +156,14 @@ class PacketAssembler final {
 
   NetBufferListContainer async_net_buffer_list_;
   NetBufferListContainer sync_net_buffer_list_;
-  UINT max_nbls_to_indicate_;
   UINT num_nbls_;
+  UINT max_nbls_to_indicate_;
+
+  bool segment_coalescing_enabled_;
 
   NDIS_HANDLE const net_buffer_list_pool_;
   NDIS_HANDLE const miniport_handle_;
   AdapterStatistics* const statistics_;
-
-  bool segment_coalescing_enabled_;
 };
 
 #endif  // PACKET_ASSEMBLER_H_

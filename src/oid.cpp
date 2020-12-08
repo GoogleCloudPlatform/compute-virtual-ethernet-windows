@@ -51,11 +51,21 @@ const char* GetOidName(NDIS_OID oid) {
     MAKE_CASE_TO_STRING(OID_802_3_MAXIMUM_LIST_SIZE)
     MAKE_CASE_TO_STRING(OID_PNP_SET_POWER)
     MAKE_CASE_TO_STRING(OID_PNP_QUERY_POWER)
+    MAKE_CASE_TO_STRING(OID_GEN_MEDIA_SUPPORTED)
+    MAKE_CASE_TO_STRING(OID_GEN_MEDIA_IN_USE)
     MAKE_CASE_TO_STRING(OID_IP4_OFFLOAD_STATS)
     MAKE_CASE_TO_STRING(OID_OFFLOAD_ENCAPSULATION)
     MAKE_CASE_TO_STRING(OID_TCP_OFFLOAD_PARAMETERS)
     MAKE_CASE_TO_STRING(OID_GEN_RECEIVE_SCALE_PARAMETERS)
     MAKE_CASE_TO_STRING(OID_GEN_RECEIVE_HASH)
+    MAKE_CASE_TO_STRING(OID_GEN_HARDWARE_STATUS)
+    MAKE_CASE_TO_STRING(OID_GEN_MAXIMUM_SEND_PACKETS)
+    MAKE_CASE_TO_STRING(OID_GEN_XMIT_ERROR)
+    MAKE_CASE_TO_STRING(OID_GEN_RCV_ERROR)
+    MAKE_CASE_TO_STRING(OID_GEN_RCV_NO_BUFFER)
+    MAKE_CASE_TO_STRING(OID_802_3_RCV_ERROR_ALIGNMENT)
+    MAKE_CASE_TO_STRING(OID_802_3_XMIT_ONE_COLLISION)
+    MAKE_CASE_TO_STRING(OID_802_3_XMIT_MORE_COLLISIONS)
     default:
       return nullptr;
   }
@@ -69,8 +79,35 @@ bool ValidateOffloadEncapsulationRequest(
          encaps.Header.Type == NDIS_OBJECT_TYPE_OFFLOAD_ENCAPSULATION &&
          (encaps.IPv4.Enabled != NDIS_OFFLOAD_SET_ON ||
           (encaps.IPv4.EncapsulationType & NDIS_ENCAPSULATION_IEEE_802_3)) &&
-         (encaps.IPv4.Enabled != NDIS_OFFLOAD_SET_ON ||
-          (encaps.IPv4.EncapsulationType & NDIS_ENCAPSULATION_IEEE_802_3));
+         (encaps.IPv6.Enabled != NDIS_OFFLOAD_SET_ON ||
+          (encaps.IPv6.EncapsulationType & NDIS_ENCAPSULATION_IEEE_802_3));
+}
+
+NDIS_STATUS Fill64BitOidQueryInformation(NDIS_OID_REQUEST* oid_request,
+                                         UINT64 reply) {
+  PAGED_CODE();
+  UINT32 desired_reply_size = sizeof(UINT64);
+  UINT32 buffer_length =
+      oid_request->DATA.QUERY_INFORMATION.InformationBufferLength;
+  oid_request->DATA.QUERY_INFORMATION.BytesNeeded = desired_reply_size;
+
+  if (buffer_length < desired_reply_size) {
+    // Allow backwards compatibility with 32-bit OID requests.
+    if (buffer_length == sizeof(UINT32) && (reply & MAXUINT32) == reply) {
+      UINT32 temp_reply = static_cast<UINT32>(reply);
+      NdisMoveMemory(oid_request->DATA.QUERY_INFORMATION.InformationBuffer,
+                     &temp_reply, sizeof(UINT32));
+      oid_request->DATA.QUERY_INFORMATION.BytesWritten = sizeof(UINT32);
+      return NDIS_STATUS_SUCCESS;
+    }
+    oid_request->DATA.QUERY_INFORMATION.BytesWritten = 0;
+    return NDIS_STATUS_BUFFER_TOO_SHORT;
+  }
+
+  NdisMoveMemory(oid_request->DATA.QUERY_INFORMATION.InformationBuffer, &reply,
+                 desired_reply_size);
+  oid_request->DATA.QUERY_INFORMATION.BytesWritten = desired_reply_size;
+  return NDIS_STATUS_SUCCESS;
 }
 
 NDIS_STATUS FillOidQueryInformation(NDIS_OID_REQUEST* oid_request,
@@ -78,6 +115,7 @@ NDIS_STATUS FillOidQueryInformation(NDIS_OID_REQUEST* oid_request,
   PAGED_CODE();
   oid_request->DATA.QUERY_INFORMATION.BytesNeeded = static_cast<UINT32>(size);
   if (oid_request->DATA.QUERY_INFORMATION.InformationBufferLength < size) {
+    oid_request->DATA.QUERY_INFORMATION.BytesWritten = 0;
     return NDIS_STATUS_BUFFER_TOO_SHORT;
   }
 
@@ -117,6 +155,38 @@ NDIS_STATUS CopyOidInformation(NDIS_OID_REQUEST* oid_request, void* dest,
   return status;
 }
 
+NDIS_STATUS HandlePowerOid(AdapterContext* adapter_context,
+                           NDIS_OID_REQUEST* oid_request) {
+  NDIS_DEVICE_POWER_STATE new_state;
+  NDIS_STATUS status =
+      CopyOidInformation(oid_request, &new_state, sizeof(new_state));
+  if (status != NDIS_STATUS_SUCCESS) {
+    return status;
+  }
+
+  switch (new_state) {
+    case NdisDeviceStateD0:
+      // The framework will call GvnicRestart once this OID request returns, so
+      // prior to that the admin queue must be reconfigured.
+      status = adapter_context->device.BeginTransitionToFullPowerState();
+      break;
+    case NdisDeviceStateD1:
+      __fallthrough;
+    case NdisDeviceStateD2:
+      __fallthrough;
+    case NdisDeviceStateD3:
+      // The framework has already called GvnicPause and the queues have been
+      // destroyed, so the admin queue can safely be deconfigured.
+      status = adapter_context->device.FinishTransitionToLowPowerState();
+      break;
+    default:
+      // This should never happen.
+      NT_ASSERT(false);
+  }
+
+  return status;
+}
+
 NDIS_STATUS HandleOidQuery(const AdapterContext& context,
                            NDIS_OID_REQUEST* oid_request) {
   PAGED_CODE();
@@ -131,25 +201,44 @@ NDIS_STATUS HandleOidQuery(const AdapterContext& context,
     }
     case OID_GEN_XMIT_OK: {
       // The number of frames that have been transmitted without errors.
-
       UINT64 xmit_pkts = context.statistics.GetTransmitPacketCount();
-      status = FillOidQueryInformation(oid_request, &xmit_pkts, sizeof(UINT64));
+      status = Fill64BitOidQueryInformation(oid_request, xmit_pkts);
+      break;
+    }
+    case OID_GEN_XMIT_ERROR: {
+      UINT64 xmit_errors = context.statistics.GetTransmitErrorCount();
+      status = Fill64BitOidQueryInformation(oid_request, xmit_errors);
       break;
     }
     case OID_GEN_RCV_OK: {
       // The number of frames that the NIC receives without errors and indicates
       // to bound protocols.
-
       UINT64 rcv_pkts = context.statistics.GetReceivePacketCount();
-      status = FillOidQueryInformation(oid_request, &rcv_pkts, sizeof(UINT64));
+      status = Fill64BitOidQueryInformation(oid_request, rcv_pkts);
+      break;
+    }
+    case OID_GEN_RCV_ERROR: {
+      UINT64 rcv_errors = context.statistics.GetReceiveErrorCount();
+      status = Fill64BitOidQueryInformation(oid_request, rcv_errors);
+      break;
+    }
+    case OID_GEN_RCV_NO_BUFFER:
+      __fallthrough;
+    case OID_802_3_RCV_ERROR_ALIGNMENT:
+      __fallthrough;
+    case OID_802_3_XMIT_ONE_COLLISION:
+      __fallthrough;
+    case OID_802_3_XMIT_MORE_COLLISIONS: {
+      // These statistics are not relevant to this driver, and thus not tracked.
+      status = Fill64BitOidQueryInformation(oid_request, /*reply=*/0);
       break;
     }
     case OID_GEN_TRANSMIT_BUFFER_SPACE: {
       // The amount of memory, in bytes, on the NIC that is available for
       // buffering transmit data.
-
       const QueueConfig& tx_queue = context.device.transmit_queue_config();
-      UINT32 tx_buffer_size = tx_queue.num_slices * tx_queue.num_traffic_class *
+      UINT32 tx_buffer_size = tx_queue.num_slices *
+                              tx_queue.tx.num_traffic_class *
                               tx_queue.pages_per_queue_page_list * PAGE_SIZE;
       status =
           FillOidQueryInformation(oid_request, &tx_buffer_size, sizeof(UINT32));
@@ -158,12 +247,36 @@ NDIS_STATUS HandleOidQuery(const AdapterContext& context,
     case OID_GEN_RECEIVE_BUFFER_SPACE: {
       // The amount of memory on the NIC that is available for buffering receive
       // data.
-
       const QueueConfig& rx_queue = context.device.receive_queue_config();
-      UINT32 rx_buffer_size = rx_queue.num_slices * rx_queue.num_traffic_class *
+      UINT32 rx_buffer_size = rx_queue.num_slices * rx_queue.rx.num_groups *
                               rx_queue.pages_per_queue_page_list * PAGE_SIZE;
       status =
           FillOidQueryInformation(oid_request, &rx_buffer_size, sizeof(UINT32));
+      break;
+    }
+    case OID_GEN_HARDWARE_STATUS: {
+      NDIS_HARDWARE_STATUS hardware_status = NdisHardwareStatusReady;
+      status = FillOidQueryInformation(oid_request, &hardware_status,
+                                       sizeof(NDIS_HARDWARE_STATUS));
+      break;
+    }
+    case OID_GEN_MAXIMUM_SEND_PACKETS: {
+      // The maximum possible number of packets, with one descriptor per packet.
+      const QueueConfig& tx_queue_config =
+          context.device.transmit_queue_config();
+      UINT32 tx_num_descriptors =
+          tx_queue_config.num_queues * tx_queue_config.num_descriptors;
+      status = FillOidQueryInformation(oid_request, &tx_num_descriptors,
+                                       sizeof(UINT32));
+      break;
+    }
+    case OID_GEN_MEDIA_SUPPORTED:
+      __fallthrough;
+    case OID_GEN_MEDIA_IN_USE: {
+      // This value is set during miniport initialization and cached by NDIS,
+      // but we fail certification unless we support this obsolete OID.
+      UINT32 medium = NdisMedium802_3;
+      status = FillOidQueryInformation(oid_request, &medium, sizeof(UINT32));
       break;
     }
     case OID_GEN_TRANSMIT_BLOCK_SIZE:
@@ -182,7 +295,6 @@ NDIS_STATUS HandleOidQuery(const AdapterContext& context,
     case OID_GEN_MAXIMUM_TOTAL_SIZE: {
       // The maximum total packet length, in bytes, the NIC supports. This
       // specification includes the header.
-
       status = FillOidQueryInformation(
           oid_request, &context.device.max_packet_size().max_full_size,
           sizeof(UINT32));
@@ -200,7 +312,6 @@ NDIS_STATUS HandleOidQuery(const AdapterContext& context,
     case OID_GEN_VENDOR_DRIVER_VERSION: {
       // The low-order half of the return value specifies the minor version;
       // the high-order half specifies the major version.
-
       UINT version_number = MAJOR_DRIVER_VERSION << 16 | MINOR_DRIVER_VERSION;
       status =
           FillOidQueryInformation(oid_request, &version_number, sizeof(UINT32));
@@ -219,7 +330,6 @@ NDIS_STATUS HandleOidQuery(const AdapterContext& context,
     case OID_PNP_QUERY_POWER: {
       // Whether it can transition its network adapter to the low-power state
       // specified in the InformationBuffer.
-
       status = NDIS_STATUS_SUCCESS;
       break;
     }
@@ -244,10 +354,10 @@ NDIS_STATUS HandleOidQuery(const AdapterContext& context,
           NdisInterruptModerationNotSupported;
       status = FillOidQueryInformation(oid_request, &interrupt_moderation,
                                        sizeof(interrupt_moderation));
+      break;
     }
-
     default: {
-      status = STATUS_NDIS_NOT_SUPPORTED;
+      status = NDIS_STATUS_NOT_SUPPORTED;
       break;
     }
   }
@@ -318,10 +428,11 @@ NDIS_STATUS HandleOidSet(AdapterContext* context,
       break;
     }
     case OID_PNP_SET_POWER: {
-      // Notifies a miniport driver that its underlying network adapter will be
-      // transitioning to the device power state specified in the
-      // InformationBuffer.
-      status = NDIS_STATUS_NOT_ACCEPTED;
+      // NDIS will call GvnicPause when leaving D0, and GvnicRestart when
+      // entering D0. This may cause a PCI bus reset which will force release
+      // the admin queue, so to be safe we will always deconfigure and
+      // reconfigure the admin queue during power transitions.
+      status = HandlePowerOid(context, oid_request);
       break;
     }
     case OID_TCP_OFFLOAD_PARAMETERS: {
@@ -361,7 +472,7 @@ NDIS_STATUS HandleOidSet(AdapterContext* context,
       break;
     }
     default: {
-      status = STATUS_NDIS_NOT_SUPPORTED;
+      status = NDIS_STATUS_NOT_SUPPORTED;
       break;
     }
   }
@@ -411,35 +522,12 @@ NDIS_STATUS GvnicOidRequest(NDIS_HANDLE miniport_adapter_context,
 //   miniport_adapter_context - A handle to a context area that the miniport
 //    driver allocated in its MiniportInitializeEx function.
 //   request_id - A cancellation identifier for the request.
-VOID GvnicOidCancelRequest(NDIS_HANDLE hminiport_adapter_context,
+VOID GvnicOidCancelRequest(NDIS_HANDLE miniport_adapter_context,
                            PVOID request_id) {
-  UNREFERENCED_PARAMETER(hminiport_adapter_context);
-  UNREFERENCED_PARAMETER(request_id);
-}
-
-#if NDIS_SUPPORT_NDIS61
-// Callback to handle a direct OID request to query or set information.
-// Arguments:
-//   miniport_adapter_context - A handle to a context area that the miniport
-//    driver allocated in its MiniportInitializeEx function.
-//   ndis_oid_request - A pointer to an NDIS_OID_REQUEST structure that contains
-//    both the buffer and the request packet for the miniport driver to handle.
-NDIS_STATUS GvnicDirectOidRequest(NDIS_HANDLE miniport_adapter_context,
-                                  PNDIS_OID_REQUEST ndis_oid_request) {
-  NDIS_STATUS status = NDIS_STATUS_NOT_SUPPORTED;
-  UNREFERENCED_PARAMETER(miniport_adapter_context);
-  UNREFERENCED_PARAMETER(ndis_oid_request);
-  return status;
-}
-
-// Callback to cancel a direct OID request.
-// Arguments:
-//   miniport_adapter_context - A handle to a context area that the miniport
-//    driver allocated in its MiniportInitializeEx function.
-//   request_id - A cancellation identifier for the request.
-VOID GvnicCancelDirectOidRequest(NDIS_HANDLE miniport_adapter_context,
-                                 PVOID request_id) {
   UNREFERENCED_PARAMETER(miniport_adapter_context);
   UNREFERENCED_PARAMETER(request_id);
+
+  // This callback is only required for OID requests that return
+  // NDIS_STATUS_PENDING and continue processing the OID asynchronously. This
+  // driver completes all OID requests synchronously, so there is nothing to do.
 }
-#endif  // NDIS_SUPPORT_NDIS61

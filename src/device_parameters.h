@@ -29,6 +29,7 @@ struct MaxPacketSize {
 struct GvnicDeviceParameters {
   UINT32 max_tx_queues;
   UINT32 max_rx_queues;
+  bool support_raw_addressing;
   DeviceDescriptor descriptor;
 };
 
@@ -38,8 +39,15 @@ struct QueueConfig {
   UINT32 array_size;
   UINT32 max_slices;
   UINT32 num_slices;
-  UINT32 max_traffic_class;
-  UINT32 num_traffic_class;
+  union {
+    struct {
+      UINT32 num_traffic_class;
+      UINT32 max_traffic_class;
+    } tx;
+    struct {
+      UINT32 num_groups;
+    } rx;
+  };
   UINT32 num_descriptors;
   UINT32 pages_per_queue_page_list;
 };

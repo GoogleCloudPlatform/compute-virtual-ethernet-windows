@@ -36,7 +36,8 @@ struct GvnicDeviceConfig {
   UINT32 admin_queue_pfn;
   UINT32 admin_queue_doorbell;
   UINT32 admin_queue_event_counter;
-  UINT8 reserved[3];
+  UINT8 reserved[2];
+  UINT8 dma_mask;
   UINT8 driver_version;
 };
 static_assert(sizeof(GvnicDeviceConfig) == 0x20,
@@ -115,6 +116,33 @@ struct UnregisterPageListCommand {
   UINT32 page_list_id;
 };
 
+// Special QueuePageList Id if using raw addressing.
+constexpr UINT32 kRawAddressingPageListId = 0xFFFFFFFF;
+
+// Windows can fragment the header across multiple entries in the scatter
+// gather list, and the on-host virtual switch requires that the header be
+// stored contiguously within the first packet descriptor. If the overall packet
+// is longer than 182 bytes and the first scatter gather element is smaller than
+// 182 bytes, we copy 182 bytes into a temporary buffer to form the first packet
+// descriptor.
+// LINT.IfChange(BytesRequiredInTxPacketDescriptor)
+constexpr UINT32 kBytesRequiredInTxPacketDescriptor = 182;
+// LINT.ThenChange()
+
+// The on-host virtual switch limits the number of descriptors a single packet
+// can use. Unless buffered, in raw addressing mode each scatter gather entry
+// will require a descriptor.
+// LINT.IfChange(MaxDescriptorsPerPacket)
+constexpr UINT32 kMaxDescriptorsPerPacket = 18;
+// LINT.ThenChange()
+
+// This is used when configuring the MSI-X entries, which happens before we can
+// query the device for the actual number of tx and rx slices (each of which
+// requires a dedicated entry). One MSI-X entry is expected per CPU up to this
+// amount for both rx and tx, with a single MSI-X entry reserved for the
+// management interrupt.
+constexpr UINT32 kMaxPerDirectionTrafficSlices = 16;
+
 // Both queue_resources_addr and tx_ring_addr are allocated by driver and needs
 // to be released by driver after calling DestoryTransmitQueue.
 struct CreateTransmitQueueCommand {
@@ -124,6 +152,8 @@ struct CreateTransmitQueueCommand {
   UINT64 tx_ring_addr;
   UINT32 queue_page_list_id;
   UINT32 notify_blk_id;
+
+  UINT8 reserved[4];
 };
 
 // queue_resources_addr, rx_desc_ring_addr and rx_data_ring_addr are allocated
@@ -177,6 +207,12 @@ struct AdminQueueCommand {
 
 constexpr size_t kAdminQeueueCommandSize = sizeof(AdminQueueCommand);
 
+struct DeviceOption {
+  UINT16 option_id;
+  UINT16 option_length;
+  UINT32 required_features_mask;
+};
+
 struct DeviceDescriptor {
   UINT64 max_registered_pages;
   UINT16 num_rx_groups;
@@ -192,12 +228,13 @@ struct DeviceDescriptor {
   UINT16 total_length;
 
   UINT8 reserved2[6];
+
+  // Support up-to 20 device option.
+  DeviceOption device_option[20];
 };
 
-struct DeviceOption {
-  UINT32 option_id;
-  UINT32 option_length;
-};
+// DeviceOption IDs
+constexpr UINT16 kSupportsRawAddressing = 1;
 
 // Event counter registered with the device. It must be in sizeof(UINT32).
 // For now, it is used in tx_ring to record how many packets is sent.
@@ -207,6 +244,7 @@ union DeviceCounter {
 
 // Interrupt Request flag.
 constexpr UINT32 kInterruptRequestACK = 1u << 31;
+constexpr UINT32 kInterruptRequestMask = 1u << 30;
 constexpr UINT32 kInterruptRequestEvent = 1u << 29;
 
 // Device will set these fields and let driver knows how to send notice to it.
@@ -370,6 +408,7 @@ __declspec(align(kCacheLineSize)) struct NotifyBlock {
   TxRing* tx_ring;
   RxRing** rx_rings;
   UINT32 num_rx_rings;
+  KAFFINITY processor_affinity;
 };
 
 #endif  // ABI_H_

@@ -16,8 +16,10 @@
 
 #include <ndis.h>
 
-#include "interrupt.h"  // NOLINT: include directory
-#include "trace.h"      // NOLINT: include directory
+#include "interrupt.h"           // NOLINT: include directory
+#include "trace.h"               // NOLINT: include directory
+#include "tx_ring.h"             // NOLINT: include directory
+#include "utils.h"               // NOLINT: include directory
 
 #include "adapter_resource.tmh"  // NOLINT: trace message header
 
@@ -30,8 +32,11 @@ VOID ProcessSGListHandler(IN PDEVICE_OBJECT device_object, IN PVOID reserved,
                           IN PVOID context) {
   UNREFERENCED_PARAMETER(reserved);
   UNREFERENCED_PARAMETER(device_object);
-  UNREFERENCED_PARAMETER(scatter_gather_list);
-  UNREFERENCED_PARAMETER(context);
+
+  auto* net_buffer = static_cast<NET_BUFFER*>(context);
+  auto* tx_ring =
+      static_cast<TxRing*>(net_buffer->MiniportReserved[kNetBufferTxRingIdx]);
+  tx_ring->ProcessSGList(net_buffer, scatter_gather_list);
 }
 }  // namespace
 
@@ -44,6 +49,8 @@ NDIS_STATUS AdapterResources::Initialize(NDIS_HANDLE driver_handle,
 
   driver_handle_ = driver_handle;
   miniport_handle_ = miniport_handle;
+
+  NdisZeroMemory(&bars_, sizeof(bars_));
 
   // Find resource
   int bar_idx = 0;
@@ -124,6 +131,14 @@ void AdapterResources::WriteDoorbell(UINT32 doorbell_index, UINT32 value) {
                 RtlUlongByteSwap(value));
 }
 
+void AdapterResources::DeregisterInterrupts() {
+  PAGED_CODE();
+  if (interrupt_handle_ != nullptr) {
+    NdisMDeregisterInterruptEx(interrupt_handle_);
+    interrupt_handle_ = nullptr;
+  }
+}
+
 void AdapterResources::Release() {
   PAGED_CODE();
 
@@ -169,19 +184,53 @@ NDIS_STATUS AdapterResources::AllocateNetBufferListPool() {
   return NDIS_STATUS_SUCCESS;
 }
 
+ULONG AdapterResources::GetDmaRegistrationFlags() {
+  UINT8 dma_mask;
+  ReadRegister(kConfigStatusRegister,
+               FIELD_OFFSET(GvnicDeviceConfig, dma_mask),
+               &dma_mask);
+
+  ULONG flags;
+  switch (dma_mask) {
+    case 32:
+      // Clearing the flags means 32 bit addressing.
+      flags = 0;
+      break;
+    default:
+      DEBUGP(GVNIC_WARNING,
+             "Warning: [%s] Device requested a %d bit DMA mask which is "
+             "an unsupported option. Using a 64 bit DMA mask instead.",
+             __FUNCTION__, dma_mask);
+      __fallthrough;
+    case 64:
+      flags = NDIS_SG_DMA_64_BIT_ADDRESS;
+  }
+
+  DEBUGP(GVNIC_INFO, "[%s] Registering DMA with flags: %#X", __FUNCTION__,
+         flags);
+
+  return flags;
+}
+
 NDIS_STATUS AdapterResources::RegisterDma() {
   NDIS_SG_DMA_DESCRIPTION dma_description;
   dma_description.Header.Type = NDIS_OBJECT_TYPE_SG_DMA_DESCRIPTION;
   dma_description.Header.Revision = NDIS_SG_DMA_DESCRIPTION_REVISION_1;
-  dma_description.Header.Size = sizeof(dma_description);
-  // NIC can use 64-bit addressing.
-  dma_description.Flags = NDIS_SG_DMA_64_BIT_ADDRESS;
+  dma_description.Header.Size = NDIS_SIZEOF_SG_DMA_DESCRIPTION_REVISION_1;
+  dma_description.Flags = GetDmaRegistrationFlags();
   dma_description.MaximumPhysicalMapping = kGvnicMaxDmaPhysicalMapping;
   dma_description.ProcessSGListHandler = ProcessSGListHandler;
   dma_description.SharedMemAllocateCompleteHandler = NULL;
   dma_description.ScatterGatherListSize = 0;
-  return NdisMRegisterScatterGatherDma(miniport_handle_, &dma_description,
-                                       &dma_handle_);
+
+  NDIS_STATUS status = NdisMRegisterScatterGatherDma(
+      miniport_handle_, &dma_description, &dma_handle_);
+
+  if (status == NDIS_STATUS_SUCCESS) {
+    recommended_sg_list_size_ = dma_description.ScatterGatherListSize;
+  }
+
+  return status;
 }
 
 NDIS_STATUS AdapterResources::RegisterInterrupt(PVOID adapter_context) {

@@ -63,7 +63,7 @@ class SpinLockContext {
   }
 
   NDIS_SPIN_LOCK* spin_lock_;
-  bool is_dpc_level_;
+  const bool is_dpc_level_;
 };
 
 #endif  // SPIN_LOCK_CONTEXT_H_

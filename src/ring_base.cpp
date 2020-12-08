@@ -21,11 +21,22 @@
 
 #include "ring_base.tmh"  // NOLINT: trace message header
 
+namespace {
+
+BOOLEAN SynchronousPrepareForReleaseCallback(NDIS_HANDLE SynchronizeContext) {
+  RingBase* ring = reinterpret_cast<RingBase*>(SynchronizeContext);
+  ring->PrepareForRelease();
+
+  return TRUE;
+}
+
+}  // namespace
+
 RingBase::~RingBase() { Release(); }
 
 bool RingBase::Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
-                    QueuePageList* queue_page_list, UINT32 notify_id,
-                    AdapterResources* adapter_resource,
+                    bool use_raw_addressing, QueuePageList* queue_page_list,
+                    UINT32 notify_id, AdapterResources* adapter_resource,
                     AdapterStatistics* statistics,
                     const DeviceCounter* device_counters) {
   PAGED_CODE();
@@ -33,6 +44,7 @@ bool RingBase::Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
   id_ = id;
   slice_ = slice;
   traffic_class_ = traffic_class;
+  use_raw_addressing_ = use_raw_addressing;
   queue_page_list_ = queue_page_list;
   notify_id_ = notify_id;
   adapter_resource_ = adapter_resource;
@@ -46,15 +58,17 @@ bool RingBase::Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
     return false;
   }
 
-  is_init_ = true;
+  InterlockedExchange(&is_init_, 1);
   return true;
 }
 
 void RingBase::Release() {
   PAGED_CODE();
   resources_.Release();
-  is_init_ = false;
+  InterlockedExchange(&is_init_, 0);
 }
+
+bool RingBase::Invalidate() { return !!InterlockedExchange(&is_init_, 0); }
 
 void RingBase::WriteDoorbell(ULONG value) {
   KeMemoryBarrier();
@@ -76,7 +90,6 @@ void RingBase::WriteDoorbell(ULONG value) {
 }
 
 UINT32 RingBase::ReadPacketsSent() {
-  // TODO: flush the memory before read.
   KeMemoryBarrier();
   UINT32 counter_idx = GetDeviceCounterIndex();
 
@@ -92,4 +105,17 @@ UINT32 RingBase::GetDoorbellIndex() const {
 
 UINT32 RingBase::GetDeviceCounterIndex() const {
   return RtlUlongByteSwap(resources_.virtual_address()->counter_index);
+}
+
+void RingBase::SynchronousPrepareForRelease() {
+  if (!is_init()) {
+    // Ring hasn't been initialized, no need to synchronize.
+    PrepareForRelease();
+    return;
+  }
+
+  // Callback is invoked at dispatch level.
+  NdisMSynchronizeWithInterruptEx(adapter_resource_->interrupt_handle(),
+                                  notify_id_,
+                                  SynchronousPrepareForReleaseCallback, this);
 }

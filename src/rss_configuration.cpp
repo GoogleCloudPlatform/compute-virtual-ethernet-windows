@@ -24,10 +24,44 @@
 namespace {
 bool IsPowerOfTwo(UINT32 num) { return (num != 0) && ((num & (num - 1)) == 0); }
 
+bool IsValidHashFunc(UINT8 func) { return func == NdisHashFunctionToeplitz; }
+
+bool IsValidHashType(UINT32 type) {
+  constexpr UINT32 valid_hash_types =
+      NDIS_HASH_IPV4 | NDIS_HASH_TCP_IPV4 | NDIS_HASH_UDP_IPV4 |
+      NDIS_HASH_IPV6 | NDIS_HASH_TCP_IPV6 | NDIS_HASH_UDP_IPV6 |
+      NDIS_HASH_IPV6_EX | NDIS_HASH_TCP_IPV6_EX | NDIS_HASH_UDP_IPV6_EX;
+
+  return (type & valid_hash_types) && !(type & ~valid_hash_types);
+}
+
+bool IsValidHashFuncAndType(UINT8 func, UINT32 type) {
+  // Special allowed case where a client clears the RSS settings while keeping
+  // RSS enabled.
+  if (func == 0 && type == 0) {
+    return true;
+  }
+
+  if (!IsValidHashFunc(func)) {
+    DEBUGP(GVNIC_ERROR, "[%s] Error: Unsupported hash function - %d",
+           __FUNCTION__, func);
+    return false;
+  }
+
+  if (!IsValidHashType(type)) {
+    DEBUGP(GVNIC_ERROR, "[%s] Error: Unsupported hash type - 0x%X",
+           __FUNCTION__, type);
+    return false;
+  }
+
+  return true;
+}
+
 }  // namespace
 
 NDIS_RECEIVE_SCALE_CAPABILITIES
-RSSConfiguration::GetCapabilities(UINT32 num_msi_vectors, UINT32 num_rx_queue) {
+RSSConfiguration::GetCapabilities(UINT32 num_msi_vectors,
+                                  UINT32 num_rx_slices) {
   NDIS_RECEIVE_SCALE_CAPABILITIES capabilities = {};
   capabilities.Header.Type = NDIS_OBJECT_TYPE_RSS_CAPABILITIES;
 #if (NDIS_SUPPORT_NDIS630)
@@ -47,7 +81,7 @@ RSSConfiguration::GetCapabilities(UINT32 num_msi_vectors, UINT32 num_rx_queue) {
       NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV6_EX | NdisHashFunctionToeplitz;
 
   capabilities.NumberOfInterruptMessages = num_msi_vectors;
-  capabilities.NumberOfReceiveQueues = num_rx_queue;
+  capabilities.NumberOfReceiveQueues = num_rx_slices;
 #if (NDIS_SUPPORT_NDIS630)
   capabilities.NumberOfIndirectionTableEntries = kMaxIndirectionTableSize;
 #endif
@@ -58,10 +92,22 @@ RSSConfiguration::GetCapabilities(UINT32 num_msi_vectors, UINT32 num_rx_queue) {
 void RSSConfiguration::Init(bool is_supported, UINT num_rx_slices) {
   Reset();
   is_supported_ = is_supported;
+  num_rx_slices_ = num_rx_slices;
+  UpdateScaleFactor();
+}
+
+void RSSConfiguration::UpdateScaleFactor() {
   UINT processor_count = GetSystemProcessorCount();
-  if (processor_count >= 2 * num_rx_slices) {
+  if (processor_count >= 2 * num_rx_slices_) {
     scale_factor_ = 2;
   }
+}
+
+ULONG RSSConfiguration::GetIndirectionTableEntry(int index) const {
+  ULONG slice_index =
+      (indirection_table_[index].Number - lowest_cpu_index_in_table_) /
+      scale_factor_;
+  return slice_index % num_rx_slices_;
 }
 
 void RSSConfiguration::Reset() {
@@ -71,6 +117,8 @@ void RSSConfiguration::Reset() {
   base_cpu_number_ = 0;
   indirection_table_entry_count_ = 0;
   scale_factor_ = 1;
+  num_rx_slices_ = 1;
+  lowest_cpu_index_in_table_ = GetSystemProcessorCount() - 1;
   NdisZeroMemory(hash_secret_key_, kHashKeySize * sizeof(UINT8));
   NdisZeroMemory(indirection_table_,
                  kMaxIndirectionTableSize * sizeof(PROCESSOR_NUMBER));
@@ -78,7 +126,7 @@ void RSSConfiguration::Reset() {
 
 NDIS_STATUS RSSConfiguration::ApplyReceiveScaleParameters(
     const NDIS_RECEIVE_SCALE_PARAMETERS* rss_params, UINT32 param_length,
-    UINT32* num_byte_read) {
+    UINT32 num_rx_slices, UINT32* num_byte_read) {
   DEBUGP(GVNIC_INFO, "[%s] rss param flag: %#x", __FUNCTION__,
          rss_params->Flags);
   if (!is_supported_) {
@@ -91,7 +139,7 @@ NDIS_STATUS RSSConfiguration::ApplyReceiveScaleParameters(
     return status;
   }
 
-  *num_byte_read = 0;
+  *num_byte_read = sizeof(NDIS_RECEIVE_SCALE_PARAMETERS);
 
   // Adjust enable flag.
   if ((rss_params->Flags & NDIS_RSS_PARAM_FLAG_DISABLE_RSS) ||
@@ -100,14 +148,25 @@ NDIS_STATUS RSSConfiguration::ApplyReceiveScaleParameters(
     return NDIS_STATUS_SUCCESS;
   }
 
-  is_enabled_ = true;
+  if (is_enabled_ == false) {
+    num_rx_slices_ = num_rx_slices;
+    UpdateScaleFactor();
+    is_enabled_ = true;
+  }
 
   // Apply hash info change.
   if (!(rss_params->Flags & NDIS_RSS_PARAM_FLAG_HASH_INFO_UNCHANGED)) {
-    hash_func_ = NDIS_RSS_HASH_FUNC_FROM_HASH_INFO(rss_params->HashInformation);
-    NT_ASSERT(hash_func_ == 1);
+    UINT8 hash_func =
+        NDIS_RSS_HASH_FUNC_FROM_HASH_INFO(rss_params->HashInformation);
+    UINT32 hash_type =
+        NDIS_RSS_HASH_TYPE_FROM_HASH_INFO(rss_params->HashInformation);
 
-    hash_type_ = NDIS_RSS_HASH_TYPE_FROM_HASH_INFO(rss_params->HashInformation);
+    if (!IsValidHashFuncAndType(hash_func, hash_type)) {
+      return NDIS_STATUS_INVALID_PARAMETER;
+    }
+
+    hash_func_ = hash_func;
+    hash_type_ = hash_type;
   }
 
   // Apply hash key change.
@@ -130,6 +189,10 @@ NDIS_STATUS RSSConfiguration::ApplyReceiveScaleParameters(
         OffsetToPointer(const_cast<NDIS_RECEIVE_SCALE_PARAMETERS*>(rss_params),
                         rss_params->IndirectionTableOffset),
         rss_params->IndirectionTableSize);
+    for (UINT16 i = 0; i < indirection_table_entry_count_; i++) {
+      lowest_cpu_index_in_table_ =
+          min(lowest_cpu_index_in_table_, indirection_table_[i].Number);
+    }
 
     *num_byte_read += rss_params->IndirectionTableSize;
 
@@ -143,8 +206,6 @@ NDIS_STATUS RSSConfiguration::ApplyReceiveScaleParameters(
     base_cpu_number_ = rss_params->BaseCpuNumber;
   }
 
-  *num_byte_read += sizeof(NDIS_RECEIVE_SCALE_PARAMETERS);
-
   return NDIS_STATUS_SUCCESS;
 }
 
@@ -154,13 +215,9 @@ NDIS_STATUS RSSConfiguration::ValidateRSSParamters(
     return NDIS_STATUS_INVALID_LENGTH;
   }
 
-  if (rss_params->Flags & NDIS_RSS_PARAM_FLAG_DISABLE_RSS) {
+  if (rss_params->Flags & NDIS_RSS_PARAM_FLAG_DISABLE_RSS ||
+      rss_params->HashInformation == 0) {
     return NDIS_STATUS_SUCCESS;
-  } else {
-    // Need hash inform to turn on rss.
-    if (rss_params->HashInformation == 0) {
-      return NDIS_STATUS_INVALID_PARAMETER;
-    }
   }
 
   // Verify indirection table settings.
@@ -205,6 +262,9 @@ void RSSConfiguration::DumpSettings() {
   DEBUGP(GVNIC_INFO, "[%s] hash_type: %#x", __FUNCTION__, hash_type_);
   DEBUGP(GVNIC_INFO, "[%s] hash_function: %#x", __FUNCTION__, hash_func_);
   DEBUGP(GVNIC_INFO, "[%s] scale_factor: %#x", __FUNCTION__, scale_factor_);
+  DEBUGP(GVNIC_INFO, "[%s] num_rx_slices: %d", __FUNCTION__, num_rx_slices_);
+  DEBUGP(GVNIC_INFO, "[%s] lowest_cpu_index_in_table: %d", __FUNCTION__,
+         lowest_cpu_index_in_table_);
 
   DEBUGP(GVNIC_INFO, "[%s] indirection_table_len : %u", __FUNCTION__,
          indirection_table_entry_count_);

@@ -26,6 +26,10 @@ struct TxNetBufferList {
   NET_BUFFER_LIST* net_buffer_list;
   NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO checksum_info;
   NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO lso_info;
+  LONG num_net_buffer;
+  LONG num_ready_net_buffer;  // Net buffers ready for processing.
+  LONG num_sent_net_buffer;   // Net buffers which have been processed.
+  NDIS_STATUS status;
 };
 
 #endif  // TX_NET_BUFFER_LIST_

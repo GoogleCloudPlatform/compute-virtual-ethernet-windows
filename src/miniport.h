@@ -44,7 +44,7 @@ NDIS_STATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
                         _In_ PUNICODE_STRING RegistryPath);
 
 // Performs operations that are necessary before the system unloads the driver.
-DRIVER_UNLOAD DriverUnload;
+MINIPORT_UNLOAD DriverUnload;
 
 // To register optional services.
 SET_OPTIONS GvnicSetOptions;

@@ -16,10 +16,6 @@
 
 #include <ndis.h>
 
-#include "abi.h"            // NOLINT: include directory
-#include "netutils.h"       // NOLINT: include directory
-#include "rx_ring.h"        // NOLINT: include directory
-#include "rx_ring_entry.h"  // NOLINT: include directory
 #include "utils.h"          // NOLINT: include directory
 
 namespace {
@@ -81,20 +77,20 @@ UINT32 ComputeHash(const bool* input, const UINT8* secret_key,
 RxPacket::RxPacket(const RxRingEntry& rx_ring_entry)
     : queue_page_list_offset_(0),
       packet_flag_(0),
+      partial_csum_(0),
       eth_header_(nullptr),
       ipv4_header_(nullptr),
       tcp_header_(nullptr),
-      partial_csum_(0),
       is_ipv4_(false),
       is_tcp_(false),
       is_udp_(false),
       is_checksum_offload_(false),
       is_rss_offload_(false),
-      rss_hash_func_(0),
-      rss_hash_type_(0),
       rss_hash_value_(0),
-      checksum_info_({}),
+      rss_hash_type_(0),
+      rss_hash_func_(0),
       packet_length_(0) {
+  checksum_info_.Value = 0;
   packet_length_ = RtlUshortByteSwap(rx_ring_entry.descriptor->packet_length) -
                    kPacketHeaderPadding;
   queue_page_list_offset_ =
@@ -212,9 +208,22 @@ UINT32 RxPacket::CalculateRss(UINT32 rss_hash_type) {
   return ComputeHash(input, secret_key_, input_size);
 }
 
-
 void RxPacket::SetSecretKey(const UINT8* rss_secret_key) {
   secret_key_ = rss_secret_key;
+}
+
+void RxPacket::SetIndirectionTable(UINT16 indirection_table_entry_count,
+                                   const PROCESSOR_NUMBER* indirection_table) {
+  indirection_table_entry_count_ = indirection_table_entry_count;
+  indirection_table_ = indirection_table;
+}
+
+ULONG RxPacket::GetExpectedRSSProcessor(UINT32 rss_hash_value) {
+  const size_t rss_table_index =
+      rss_hash_value & (indirection_table_entry_count_ - 1);
+  NT_ASSERT(rss_table_index < indirection_table_entry_count_);
+
+  return indirection_table_[rss_table_index].Number;
 }
 #endif
 
@@ -224,6 +233,8 @@ void RxPacket::SetRssInfo(UINT32 rss_hash_value, UINT32 rss_hash_type,
 #if DBG
     UINT32 expect_rss_hash_value = CalculateRss(rss_hash_type);
     NT_ASSERT(rss_hash_value == expect_rss_hash_value);
+    ULONG expected_rss_processor = GetExpectedRSSProcessor(rss_hash_value);
+    NT_ASSERT(GetCurrentProcessorIndex() == expected_rss_processor);
 #endif
     rss_hash_value_ = rss_hash_value;
     rss_hash_type_ = rss_hash_type;

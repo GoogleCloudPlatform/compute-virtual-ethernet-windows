@@ -55,20 +55,26 @@ class SharedMemory final {
   // which is dangerous in the long run. To make memory management simpler,
   // caller create the instance and call Allocate() to initialize the shared
   // memory.
-  bool Allocate(const NDIS_HANDLE driver_handle, ULONG count = 1);
+  bool Allocate(const NDIS_HANDLE miniport_handle, ULONG count = 1);
 
-  // Release the allocated memory.
+  // Release the allocated memory. This will also be called by the destructor.
   void Release();
 
-  T* virtual_address() const { return buffer_virtual_address_; }
+  T* virtual_address() const {
+    return reinterpret_cast<T*>(buffer_virtual_address_);
+  }
   NDIS_PHYSICAL_ADDRESS physical_address() const {
     return buffer_physical_address_;
+  }
+
+  explicit operator bool() const {
+    return buffer_virtual_address_ != nullptr;
   }
 
  private:
   NDIS_HANDLE miniport_handle_;
   ULONG count_;
-  T* buffer_virtual_address_;
+  PVOID buffer_virtual_address_;
   NDIS_PHYSICAL_ADDRESS buffer_physical_address_;
 };
 
@@ -81,30 +87,34 @@ inline SharedMemory<T>::~SharedMemory() {
 
 template <typename T>
 inline bool SharedMemory<T>::Allocate(NDIS_HANDLE miniport_handle,
-                                      ULONG count = 1) {
+                                      ULONG count) {
   PAGED_CODE();
 
   if (buffer_virtual_address_ != nullptr) {
+    // Allocate() was already invoked without a matching Release().
     return false;
   }
 
   count_ = count;
   miniport_handle_ = miniport_handle;
-  PVOID virtual_addr = nullptr;
-  size_t length = count_ * sizeof(T);
+  const size_t length_in_bytes = count_ * sizeof(T);
 
-  NdisMAllocateSharedMemory(miniport_handle_, static_cast<ULONG>(length),
-                            /*cached=*/TRUE, &virtual_addr,
-                            &buffer_physical_address_);
-  NdisZeroMemory(virtual_addr, length);
+  NdisMAllocateSharedMemory(
+      miniport_handle_, static_cast<ULONG>(length_in_bytes),
+      /*cached=*/TRUE, &buffer_virtual_address_, &buffer_physical_address_);
+  if (buffer_virtual_address_ == nullptr) {
+    DEBUGP(GVNIC_ERROR,
+           "[%s] ERROR: Unable to allocate shared memory with size %#llX.",
+           __FUNCTION__, length_in_bytes);
+    return false;
+  }
 
-  buffer_virtual_address_ = reinterpret_cast<T*>(virtual_addr);
+  NdisZeroMemory(buffer_virtual_address_, length_in_bytes);
+  DEBUGP(GVNIC_VERBOSE,
+         "[%s] Successfully allocated shared memory with size %#llX.",
+         __FUNCTION__, length_in_bytes);
 
-  bool is_allocation_succeed = buffer_virtual_address_ != nullptr;
-  DEBUGP(GVNIC_INFO, "[%s] Allocate shared memory with size %#llX return %d",
-         __FUNCTION__, length, is_allocation_succeed);
-
-  return is_allocation_succeed;
+  return true;
 }
 
 template <typename T>
@@ -112,7 +122,7 @@ inline void SharedMemory<T>::Release() {
   PAGED_CODE();
 
   if (buffer_virtual_address_ != nullptr) {
-    DEBUGP(GVNIC_INFO, "[%s] Deallocate shared memory with size %#X.",
+    DEBUGP(GVNIC_VERBOSE, "[%s] Deallocate shared memory with size %#X.",
            __FUNCTION__, count_ * sizeof(T));
     NdisMFreeSharedMemory(miniport_handle_, count_ * sizeof(T), /*cached=*/TRUE,
                           buffer_virtual_address_, buffer_physical_address_);

@@ -30,7 +30,7 @@ struct PacketSegmentInfo {
     // length + any paddings.
     UINT32 allocated_length;
   };
-  UINT32 packet_offset;
+  UINT64 packet_offset;
   UINT32 packet_length;
   // Pakcet_length + any paddings.
   UINT32 allocated_length;

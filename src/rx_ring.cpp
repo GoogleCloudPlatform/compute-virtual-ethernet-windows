@@ -34,11 +34,16 @@ namespace {
 // be processed.
 constexpr int kSeqPrimeNumber = 7;
 
-// Max packet size driver can process async.
-constexpr int kMaxAsyncPacketSize = PAGE_SIZE / 2;
+// Max packet data size the driver can process asynchronously. If the MTU is
+// larger than half a page plus headers, a single page can not support two
+// packets and so the synchronous path with a copy must be used.
+constexpr int kMaxAsyncDataSize =
+    PAGE_SIZE / 2 - sizeof(ETH_HEADER) - kPacketHeaderPadding;
 
 // Mask use to flip the point to the first half and second half of the page.
 constexpr UINT32 kDataRingFlipMask = PAGE_SIZE / 2;
+
+constexpr ULONG kMicrosecondsBetweenPollingForRelease = 1000000;  // 1s.
 
 // We have enough notification blocks to tx_max and rx_max. So we start rx
 // notify block from tx_num_slices.
@@ -73,8 +78,9 @@ RxRing::~RxRing() {
 }
 
 bool RxRing::Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
-                  UINT32 num_descriptor, QueuePageList* queue_page_list,
-                  UINT32 notify_id, AdapterResources* adapter_resource,
+                  UINT32 num_descriptor, bool use_raw_addressing,
+                  QueuePageList* queue_page_list, UINT32 notify_id,
+                  UINT32 max_data_size, AdapterResources* adapter_resource,
                   AdapterStatistics* statistics,
                   const DeviceCounter* device_counters) {
   PAGED_CODE();
@@ -89,6 +95,7 @@ bool RxRing::Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
   rss_enabled_ = false;
   rss_hash_function_ = 0;
   rss_hash_type_ = 0;
+  max_data_size_ = max_data_size;
   NdisAllocateSpinLock(&seq_counter_spin_lock_);
 
   // The current implementation requires that we have one descriptor per page.
@@ -97,8 +104,9 @@ bool RxRing::Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
   DEBUGP(GVNIC_INFO, "[%s] Allocating resource for rx: %u with %u slots",
          __FUNCTION__, id, num_descriptor_);
 
-  if (!RingBase::Init(id, slice, traffic_class, queue_page_list, notify_id,
-                      adapter_resource, statistics, device_counters)) {
+  if (!RingBase::Init(id, slice, traffic_class, use_raw_addressing,
+                      queue_page_list, notify_id, adapter_resource, statistics,
+                      device_counters)) {
     return false;
   }
 
@@ -138,6 +146,8 @@ void RxRing::UpdateRssConfig(const RSSConfiguration& rss_config) {
   rss_hash_type_ = rss_config.hash_type();
 #ifdef DBG
   rss_secret_key_ = rss_config.hash_secret_key();
+  indirection_table_entry_count_ = rss_config.indirection_table_size();
+  indirection_table_ = rss_config.get_indirection_table();
 #endif
 }
 
@@ -146,8 +156,14 @@ bool RxRing::InitRxEntries(NDIS_HANDLE pool_handle,
   for (UINT i = 0; i < num_descriptor_; i++) {
     rx_ring_entries_[i].descriptor = descriptor_ring_.virtual_address() + i;
     rx_ring_entries_[i].data = data_ring_.virtual_address() + i;
-    rx_ring_entries_[i].data->queue_page_list_offset =
-        RtlUlonglongByteSwap(i * PAGE_SIZE);
+    rx_ring_entries_[i].ring_pending_count = &pending_async_packet_count_;
+    if (use_raw_addressing()) {
+      rx_ring_entries_[i].data->queue_page_list_offset = RtlUlonglongByteSwap(
+          queue_page_list()->page_physical_address()[i].QuadPart);
+    } else {
+      rx_ring_entries_[i].data->queue_page_list_offset =
+          RtlUlonglongByteSwap(i * PAGE_SIZE);
+    }
     rx_ring_entries_[i].pending_count = 0;
 
     // First half of the page.
@@ -198,6 +214,21 @@ bool RxRing::InitRxEntries(NDIS_HANDLE pool_handle,
 
 void RxRing::Release() {
   PAGED_CODE();
+
+  bool was_initialized = Invalidate();
+  if (!was_initialized) {
+    return;
+  }
+
+  PrepareForRelease();
+  while (!IsSafeToRelease()) {
+    DEBUGP(GVNIC_WARNING,
+           "[%s] WARNING: Rx ring has outstanding async packets and cannot be "
+           "released. Waiting for %lu microseconds.",
+           __FUNCTION__, kMicrosecondsBetweenPollingForRelease);
+    NdisMSleep(kMicrosecondsBetweenPollingForRelease);
+  }
+
   for (UINT i = 0; i < num_descriptor_; i++) {
     for (auto& net_buffer_list : rx_ring_entries_[i].net_buffer_lists) {
       if (net_buffer_list != nullptr) {
@@ -210,8 +241,15 @@ void RxRing::Release() {
   FreeMemory(rx_ring_entries_);
   rx_ring_entries_ = nullptr;
 
-  data_ring_.Release();
-  descriptor_ring_.Release();
+  if (data_ring_) {
+    data_ring_.Release();
+  }
+  if (descriptor_ring_) {
+    descriptor_ring_.Release();
+  }
+
+  NdisFreeSpinLock(&seq_counter_spin_lock_);
+
   RingBase::Release();
 }
 
@@ -269,14 +307,17 @@ bool RxRing::ProcessPendingPackets(bool is_dpc_level,
     if (rss_enabled_) {
 #ifdef DBG
       rx_packet.SetSecretKey(rss_secret_key_);
+      rx_packet.SetIndirectionTable(indirection_table_entry_count_,
+                                    indirection_table_);
 #endif
       rx_packet.SetRssInfo(RtlUlongByteSwap(cur_desc->rss_hash), rss_hash_type_,
                            rss_hash_function_);
     }
 
     // Currently, we only allow one pending packet at max.
-    NT_ASSERT(cur_entry->pending_count < 2 && cur_entry->pending_count >= 0);
-    if (rx_packet.packet_length() < kMaxAsyncPacketSize &&
+    NT_ASSERT(cur_entry->pending_count < 2);
+    NT_ASSERT(cur_entry->pending_count >= 0);
+    if (!IsPrepareForRelease() && max_data_size_ <= kMaxAsyncDataSize &&
         cur_entry->pending_count == 0) {
       // If there is no pending packets on current data page, we flip the
       // data pointer to the other half of the page and let OS handle the packet

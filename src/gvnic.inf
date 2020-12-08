@@ -35,7 +35,7 @@ HKR, Ndi\params\MTU,                ParamDesc,  0,          %MTU%
 HKR, Ndi\params\MTU,                type,       0,          "long"
 HKR, Ndi\params\MTU,                default,    0,          "1460"
 HKR, Ndi\params\MTU,                min,        0,          "576"
-HKR, Ndi\params\MTU,                max,        0,          "65500"
+HKR, Ndi\params\MTU,                max,        0,          "4080"
 HKR, Ndi\params\MTU,                step,       0,          "1"
 
 HKR, Ndi\Params\*UDPChecksumOffloadIPv4,    ParamDesc,  0,      %Std.UDPChecksumOffloadIPv4%
@@ -96,25 +96,38 @@ HKR, Ndi\params\*RscIPv6,                   Optional,   0,      "0"
 HKR, Ndi\params\*RscIPv6\enum,              "1",        0,      %Enable%
 HKR, Ndi\params\*RscIPv6\enum,              "0",        0,      %Disable%
 
-HKR, Ndi\params\NumberOfTxQueue,                ParamDesc,  0,          %NumberOfTxQueue%
-HKR, Ndi\params\NumberOfTxQueue,                type,       0,          "long"
-HKR, Ndi\params\NumberOfTxQueue,                default,    0,          "0"
-HKR, Ndi\params\NumberOfTxQueue,                min,        0,          "0"
-HKR, Ndi\params\NumberOfTxQueue,                max,        0,          "800"
-HKR, Ndi\params\NumberOfTxQueue,                step,       0,          "1"
+HKR, Ndi\params\NumberOfTxQueue,            ParamDesc,  0,      %NumberOfTxQueue%
+HKR, Ndi\params\NumberOfTxQueue,            type,       0,      "long"
+HKR, Ndi\params\NumberOfTxQueue,            default,    0,      "0"
+HKR, Ndi\params\NumberOfTxQueue,            min,        0,      "0"
+HKR, Ndi\params\NumberOfTxQueue,            max,        0,      "800"
+HKR, Ndi\params\NumberOfTxQueue,            step,       0,      "1"
 
-HKR, Ndi\params\NumberOfRxQueue,                ParamDesc,  0,          %NumberOfRxQueue%
-HKR, Ndi\params\NumberOfRxQueue,                type,       0,          "long"
-HKR, Ndi\params\NumberOfRxQueue,                default,    0,          "0"
-HKR, Ndi\params\NumberOfRxQueue,                min,        0,          "0"
-HKR, Ndi\params\NumberOfRxQueue,                max,        0,          "100"
-HKR, Ndi\params\NumberOfRxQueue,                step,       0,          "1"
+HKR, Ndi\params\NumberOfRxQueue,            ParamDesc,  0,      %NumberOfRxQueue%
+HKR, Ndi\params\NumberOfRxQueue,            type,       0,      "long"
+HKR, Ndi\params\NumberOfRxQueue,            default,    0,      "0"
+HKR, Ndi\params\NumberOfRxQueue,            min,        0,      "0"
+HKR, Ndi\params\NumberOfRxQueue,            max,        0,      "100"
+HKR, Ndi\params\NumberOfRxQueue,            step,       0,      "1"
 
-HKR, Ndi\params\*RSS,              ParamDesc,   0,          %Std.Rss%
-HKR, Ndi\params\*RSS,              Default,     0,          "1"
-HKR, Ndi\params\*RSS,              type,        0,          "enum"
-HKR, Ndi\params\*RSS\enum,         "1",         0,          %Enable%
-HKR, Ndi\params\*RSS\enum,         "0",         0,          %Disable%
+HKR, Ndi\params\RawAddressing,              ParamDesc,  0,      %RawAddressing%
+HKR, Ndi\params\RawAddressing,              default,    0,      "1"
+HKR, Ndi\params\RawAddressing,              type,       0,      "enum"
+HKR, Ndi\params\RawAddressing\enum,         "1",        0,      %Enable%
+HKR, Ndi\params\RawAddressing\enum,         "0",        0,      %Disable%
+
+HKR, Ndi\params\*RSS,                       ParamDesc,  0,      %Std.Rss%
+HKR, Ndi\params\*RSS,                       Default,    0,      "1"
+HKR, Ndi\params\*RSS,                       type,       0,      "enum"
+HKR, Ndi\params\*RSS\enum,                  "1",        0,      %Enable%
+HKR, Ndi\params\*RSS\enum,                  "0",        0,      %Disable%
+
+HKR, Ndi\params\*MaxRssProcessors,          ParamDesc,  0,      %MaxNumRssProcessors%
+HKR, Ndi\params\*MaxRssProcessors,          type,       0,      "int"
+HKR, Ndi\params\*MaxRssProcessors,          default,    0,      "16"
+HKR, Ndi\params\*MaxRssProcessors,          min,        0,      "1"
+HKR, Ndi\params\*MaxRssProcessors,          max,        0,      "32"
+HKR, Ndi\params\*MaxRssProcessors,          step,       0,      "1"
 
 [gvnic.ndi.hw]
 AddReg = gvnic.EnableMSI
@@ -181,3 +194,5 @@ Disable = "Disabled"
 
 NumberOfTxQueue = "Number of Tx Queue"
 NumberOfRxQueue = "Number of Rx Queue"
+MaxNumRssProcessors = "Max Number of RSS Processors to Use"
+RawAddressing = "Raw Addressing if Available"
