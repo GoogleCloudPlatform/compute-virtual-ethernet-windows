@@ -40,6 +40,15 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 
   WPP_INIT_TRACING(DriverObject, RegistryPath);
 
+  DEBUGP(GVNIC_VERBOSE,
+         "*** Start of gVNIC verbose log. To disable this, clear the 0x7 bit.");
+  DEBUGP(GVNIC_INFO,
+         "*** Start of gVNIC info log. To disable this, clear the 0x4 bit.");
+  DEBUGP(GVNIC_WARNING,
+         "*** Start of gVNIC warning log. To disable this, clear the 0x2 bit.");
+  DEBUGP(GVNIC_ERROR,
+         "*** Start of gVNIC error log. To disable this, clear the 0x1 bit.");
+
   DEBUGP(GVNIC_VERBOSE, "---> DriverEntry - Version %u.%u",
          MAJOR_DRIVER_VERSION, MINOR_DRIVER_VERSION);
 
