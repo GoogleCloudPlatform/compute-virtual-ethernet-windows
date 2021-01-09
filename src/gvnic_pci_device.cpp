@@ -88,7 +88,7 @@ NDIS_STATUS GvnicPciDevice::Init(AdapterResources* resources,
     status = ConfigureDeviceResource();
   }
   if (status == NDIS_STATUS_SUCCESS) {
-    rss_config_.Init(configuration.is_rss_enabled(), rx_config_.num_slices);
+    rss_config_.Init(configuration.is_rss_enabled(), num_rss_queue());
   }
 
   DEBUGP(GVNIC_VERBOSE, "<--- GvnicPciDevice::Initialize status 0x%08x\n",
@@ -1000,7 +1000,7 @@ NDIS_STATUS GvnicPciDevice::UpdateRssParameters(
 
   RSSConfiguration new_rss_config = rss_config_;
   NDIS_STATUS status = new_rss_config.ApplyReceiveScaleParameters(
-      rss_params, param_length, rx_config_.num_slices, num_byte_read);
+      rss_params, param_length, num_rss_queue(), num_byte_read);
   if (status != NDIS_STATUS_SUCCESS) {
     return status;
   }

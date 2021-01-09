@@ -99,9 +99,13 @@ class GvnicPciDevice final {
   const UCHAR* current_mac_address() const { return current_mac_; }
   const UCHAR* permanent_mac_address() const { return permanent_mac_; }
   const NotifyManager* notify_manager() const { return &notify_manager_; }
-  // We are not using num_queue as we could have multiple rx_group.
-  // num_slices matches kernel's view of receive queue.
-  UINT32 num_rss_queue() const { return rx_config_.num_slices; }
+  // We cannot use num_queues directly, as queues may be distributed across
+  // multiple rx groups. Instead we use the number of slices with queues
+  // assigned. Queues are assigned to group0 until group0 is filled, and then to
+  // group1, etc.
+  UINT32 num_rss_queue() const {
+    return min(rx_config_.num_queues, rx_config_.num_slices);
+  }
   UINT32 packet_filter() const { return packet_filter_; }
   bool use_raw_addressing() const {
     return device_params_.support_raw_addressing &&
