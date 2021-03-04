@@ -141,7 +141,9 @@ constexpr UINT32 kMaxDescriptorsPerPacket = 18;
 // requires a dedicated entry). One MSI-X entry is expected per CPU up to this
 // amount for both rx and tx, with a single MSI-X entry reserved for the
 // management interrupt.
+// LINT.IfChange(kMaxPerDirectionTrafficSlices)
 constexpr UINT32 kMaxPerDirectionTrafficSlices = 16;
+// LINT.ThenChange()
 
 // Both queue_resources_addr and tx_ring_addr are allocated by driver and needs
 // to be released by driver after calling DestoryTransmitQueue.
@@ -153,7 +155,7 @@ struct CreateTransmitQueueCommand {
   UINT32 queue_page_list_id;
   UINT32 notify_blk_id;
 
-  UINT8 reserved[4];
+  UINT8 reserved[12];
 };
 
 // queue_resources_addr, rx_desc_ring_addr and rx_data_ring_addr are allocated
@@ -168,6 +170,8 @@ struct CreateReceiveQueueCommand {
   UINT64 rx_desc_ring_addr;
   UINT64 rx_data_ring_addr;
   UINT32 queue_page_list_id;
+
+  UINT8 reserved[4];
 };
 
 struct DestroyTransmitQueueCommand {

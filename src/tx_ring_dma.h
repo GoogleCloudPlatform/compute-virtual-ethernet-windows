@@ -127,10 +127,14 @@ __declspec(align(kCacheLineSize)) class TxRingDma : public TxRing {
   // Safe to call even if Init is not invoked.
   void Release() override;
 
-  // Send all NET_BUFFER from given NET_BUFFER_LIST. Can be called at dispatch
-  // or passive level.
+  // Splits a list of NET_BUFFER_LISTs into individual NET_BUFFER_LISTs before
+  // processing them.
   void SendBufferList(PNET_BUFFER_LIST net_buffer_list,
                       bool is_dpc_level) override;
+
+  // Send all NET_BUFFER from given NET_BUFFER_LIST.
+  void ProcessNetBufferList(PNET_BUFFER_LIST net_buffer_list,
+                            bool is_dpc_level);
 
   // Read the counter for the ring and go through packet_to_complete_ list to
   // report send completion.
@@ -186,6 +190,10 @@ __declspec(align(kCacheLineSize)) class TxRingDma : public TxRing {
   // will trigger a finalization of the entire chain.
   void FailTxNetBufferList(TxNetBufferList* tx_nbl, bool is_dpc_level,
                            NDIS_STATUS error_status);
+
+  // Reports a NBL as completed, and prepends it to the completion chain.
+  void ReportNetBufferSentWithoutCompletion(TxNetBufferList* tx_net_buffer_list,
+                                            PNET_BUFFER_LIST* nbl);
 
   // Returns all in-use buffers to the buffer pool, and deallocates the pool.
   void FreeBufferPool();

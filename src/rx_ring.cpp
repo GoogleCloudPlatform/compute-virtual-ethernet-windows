@@ -314,11 +314,20 @@ bool RxRing::ProcessPendingPackets(bool is_dpc_level,
                            rss_hash_function_);
     }
 
+    // Once we are required to handle a single packet synchronously, we need
+    // to handle all following packets synchronously to prevent out of order
+    // packets, as we indicate all asynchronous packets at once followed by
+    // all synchronous packets.
+    //
+    // TODO(b/178720499): Allow alternating chains of async and sync NBLs.
+    bool required_synchronous_packet_handling = false;
+
     // Currently, we only allow one pending packet at max.
     NT_ASSERT(cur_entry->pending_count < 2);
     NT_ASSERT(cur_entry->pending_count >= 0);
     if (!IsPrepareForRelease() && max_data_size_ <= kMaxAsyncDataSize &&
-        cur_entry->pending_count == 0) {
+        cur_entry->pending_count == 0 &&
+        !required_synchronous_packet_handling) {
       // If there is no pending packets on current data page, we flip the
       // data pointer to the other half of the page and let OS handle the packet
       // asynchronously to reduce data copy.
@@ -335,7 +344,8 @@ bool RxRing::ProcessPendingPackets(bool is_dpc_level,
       }
       IncreaseRxDataRingPendingCount(cur_entry, net_buffer_list);
     } else {
-      // Cannot flip the pointer and just process it synchronously.
+      // Cannot flip the pointer so just process it synchronously.
+      required_synchronous_packet_handling = true;
       if (packet_assembler->ProcessSyncPacket(&rx_packet) == nullptr) {
         is_all_packet_processed = false;
         break;

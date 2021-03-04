@@ -364,37 +364,26 @@ void GvnicPciDevice::SendNetBufferLists(PNET_BUFFER_LIST net_buffer_list,
                                         bool is_dpc_level) {
   ULONG proc_index = GetCurrentProcessorIndex();
 
-  while (net_buffer_list) {
-    // No plan to use tx traffic class now.
-    // NDIS_NET_BUFFER_LIST_8021Q_INFO qos_info;
-    // qos_info.Value =
-    //     NET_BUFFER_LIST_INFO(net_buffer_list, Ieee8021QNetBufferListInfo);
+  TxRing* tx_ring = GetTxRing(proc_index, /*traffic_class=*/0);
+  NT_ASSERT(tx_ring->is_init());
 
-    // NT_ASSERT(qos_info.TagHeader.UserPriority == 0);
-    // UINT32 traffic_class =
-    //     ignore_flow_table_ ? 0 : qos_info.TagHeader.UserPriority;
+  if (tx_ring->IsAcceptingTraffic()) {
+    // We don't currently use traffic classes. If we did, we would break the
+    // link between NET_BUFFER_LISTs to send chains of them to different rings.
+    tx_ring->SendBufferList(net_buffer_list, is_dpc_level);
+  } else {
+    while (net_buffer_list) {
+      NET_BUFFER_LIST* next_net_buffer_list =
+          NET_BUFFER_LIST_NEXT_NBL(net_buffer_list);
+      NET_BUFFER_LIST_NEXT_NBL(net_buffer_list) = nullptr;
 
-    TxRing* tx_ring = GetTxRing(proc_index, /*traffic_class=*/0);
-    NT_ASSERT(tx_ring->is_init());
-
-    NET_BUFFER_LIST* next_net_buffer_list =
-        NET_BUFFER_LIST_NEXT_NBL(net_buffer_list);
-
-    // Break the link between the NET_BUFFER_LIST so the tx_ring won't
-    // accidentally access the next NET_BUFFER_LIST in the code. They could
-    // have different traffic class and should be handled in another tx ring.
-    NET_BUFFER_LIST_NEXT_NBL(net_buffer_list) = nullptr;
-
-    if (tx_ring->IsAcceptingTraffic()) {
-      tx_ring->SendBufferList(net_buffer_list, is_dpc_level);
-    } else {
       NET_BUFFER_LIST_STATUS(net_buffer_list) = stop_reason_;
       NdisMSendNetBufferListsComplete(
           resources_->miniport_handle(), net_buffer_list,
           is_dpc_level ? NDIS_SEND_COMPLETE_FLAGS_DISPATCH_LEVEL : 0);
-    }
 
-    net_buffer_list = next_net_buffer_list;
+      net_buffer_list = next_net_buffer_list;
+    }
   }
 }
 

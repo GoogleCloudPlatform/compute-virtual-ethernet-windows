@@ -39,6 +39,12 @@ bool TxRing::Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
 
   NdisAllocateSpinLock(&lock_);
 
+  NdisInitializeNPagedLookasideList(
+      &tx_net_buffer_list_lookaside_list_, /*Allocate=*/nullptr,
+      /*Free=*/nullptr,
+      /*Flags=*/0, max(LOOKASIDE_MINIMUM_BLOCK_SIZE, sizeof(TxNetBufferList)),
+      kGvnicMemoryTag, /*Depth=*/0);
+
   // num_descriptor is expected to be power of 2.
   if ((num_descriptor & (num_descriptor - 1)) != 0) {
     DEBUGP(GVNIC_ERROR,
@@ -78,16 +84,18 @@ void TxRing::Release() {
   PAGED_CODE();
   descriptor_ring_.Release();
   RingBase::Release();
+  NdisDeleteNPagedLookasideList(&tx_net_buffer_list_lookaside_list_);
   NdisFreeSpinLock(&lock_);
 }
 
 TxNetBufferList* TxRing::GetTxNetBufferList(PNET_BUFFER_LIST net_buffer_list) {
-  TxNetBufferList* net_packet =
-      AllocateMemory<TxNetBufferList>(miniport_handle());
+  TxNetBufferList* net_packet = static_cast<TxNetBufferList*>(
+      NdisAllocateFromNPagedLookasideList(&tx_net_buffer_list_lookaside_list_));
   if (!net_packet) {
     return nullptr;
   }
 
+  NdisZeroMemory(net_packet, sizeof(TxNetBufferList));
   net_packet->status = NDIS_STATUS_SUCCESS;
   net_packet->net_buffer_list = net_buffer_list;
 
@@ -98,6 +106,11 @@ TxNetBufferList* TxRing::GetTxNetBufferList(PNET_BUFFER_LIST net_buffer_list) {
       NET_BUFFER_LIST_INFO(net_buffer_list, TcpLargeSendNetBufferListInfo);
 
   return net_packet;
+}
+
+void TxRing::ReturnTxNetBufferList(TxNetBufferList* tx_nbl) {
+  NT_ASSERT(tx_nbl != nullptr);
+  NdisFreeToNPagedLookasideList(&tx_net_buffer_list_lookaside_list_, tx_nbl);
 }
 
 // Build descriptor for TxPacket.

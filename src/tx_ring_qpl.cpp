@@ -92,31 +92,43 @@ void TxRingQpl::Release() {
 
 void TxRingQpl::SendBufferList(PNET_BUFFER_LIST net_buffer_list,
                                bool is_dpc_level) {
-  TxNetBufferList* net_packet = GetTxNetBufferList(net_buffer_list);
-  if (!net_packet) {
-    CompleteNetBufferListWithStatus(net_buffer_list, NDIS_STATUS_RESOURCES,
-                                    is_dpc_level);
-    return;
-  }
+  {
+    SpinLockContext lock_context(&lock_, is_dpc_level);
+    while (net_buffer_list) {
+      NET_BUFFER_LIST* next_net_buffer_list =
+          NET_BUFFER_LIST_NEXT_NBL(net_buffer_list);
+      NET_BUFFER_LIST_NEXT_NBL(net_buffer_list) = nullptr;
+
+      TxNetBufferList* net_packet = GetTxNetBufferList(net_buffer_list);
+      if (!net_packet) {
+        CompleteNetBufferListWithStatus(net_buffer_list, NDIS_STATUS_RESOURCES,
+                                        is_dpc_level);
+        return;
+      }
 
 #if DBG
-  // Link the associated TxRing and TxNetBufferList to the net buffer so that
-  // we can easily find the associated objects from a stalled or corrupted net
-  // buffer. This is only used for debugging.
-  NET_BUFFER* net_buffer = NET_BUFFER_LIST_FIRST_NB(net_buffer_list);
-  while (net_buffer != nullptr) {
-    NET_BUFFER* next_net_buffer = NET_BUFFER_NEXT_NB(net_buffer);
-    net_buffer->MiniportReserved[kNetBufferTxNetBufferListIdx] = net_packet;
-    net_buffer->MiniportReserved[kNetBufferTxRingIdx] = this;
-    net_buffer = next_net_buffer;
-  }
+      // Link the associated TxRing and TxNetBufferList to the net buffer so
+      // that we can easily find the associated objects from a stalled or
+      // corrupted net buffer. This is only used for debugging.
+      NET_BUFFER* net_buffer = NET_BUFFER_LIST_FIRST_NB(net_buffer_list);
+      while (net_buffer != nullptr) {
+        NET_BUFFER* next_net_buffer = NET_BUFFER_NEXT_NB(net_buffer);
+        net_buffer->MiniportReserved[kNetBufferTxNetBufferListIdx] = net_packet;
+        net_buffer->MiniportReserved[kNetBufferTxRingIdx] = this;
+        net_buffer = next_net_buffer;
+      }
 #endif
+
+      InsertTailList(&packet_to_send_, &net_packet->list_entry);
+
+      net_buffer_list = next_net_buffer_list;
+    }
+  }
 
   PNET_BUFFER_LIST nbl_completion_list = nullptr;
   NDIS_STATUS status;
   {
     SpinLockContext lock_context(&lock_, is_dpc_level);
-    InsertTailList(&packet_to_send_, &net_packet->list_entry);
     status = SendNetPackets(&nbl_completion_list);
   }
 
@@ -270,7 +282,7 @@ void TxRingQpl::CleanPendingPackets() {
     CompleteNetBufferListWithStatus(
         current_net_buffer_list_to_send_->net_buffer_list,
         NDIS_STATUS_RESET_IN_PROGRESS, /*is_dpc_level=*/false);
-    FreeMemory(current_net_buffer_list_to_send_);
+    ReturnTxNetBufferList(current_net_buffer_list_to_send_);
     current_net_buffer_list_to_send_ = nullptr;
   }
 
@@ -282,7 +294,7 @@ void TxRingQpl::CleanPendingPackets() {
       CompleteNetBufferListWithStatus(tx_net_buffer_list->net_buffer_list,
                                       NDIS_STATUS_RESET_IN_PROGRESS,
                                       /*is_dpc_level=*/false);
-      FreeMemory(tx_net_buffer_list);
+      ReturnTxNetBufferList(tx_net_buffer_list);
     }
   }
 }
@@ -309,7 +321,7 @@ NET_BUFFER* TxRingQpl::GetNextNetBufferToSend(
             current_net_buffer_list_to_send_->net_buffer_list;
       }
 
-      FreeMemory(current_net_buffer_list_to_send_);
+      ReturnTxNetBufferList(current_net_buffer_list_to_send_);
       current_net_buffer_list_to_send_ = nullptr;
     }
   }

@@ -140,29 +140,6 @@ bool IsFailedTxNetBufferList(const TxNetBufferList& tx_nbl) {
   return tx_nbl.status != NDIS_STATUS_SUCCESS;
 }
 
-void ReportNetBufferSentWithoutCompletion(TxNetBufferList* tx_net_buffer_list,
-                                          PNET_BUFFER_LIST* nbl) {
-  // If all net buffers are sent, prepend the net buffer list to a net buffer
-  // list chain so that these can all be completed in a single framework call.
-  // The relative ordering of the net buffer lists is unimportant.
-  //
-  // Each net buffer list chain is thread local, so mutating the chain is
-  // thread safe.
-  if (InterlockedIncrement(&tx_net_buffer_list->num_sent_net_buffer) ==
-      tx_net_buffer_list->num_net_buffer) {
-    NET_BUFFER_LIST_STATUS(tx_net_buffer_list->net_buffer_list) =
-        tx_net_buffer_list->status;
-    if (*nbl == nullptr) {
-      *nbl = tx_net_buffer_list->net_buffer_list;
-    } else {
-      NET_BUFFER_LIST_NEXT_NBL(tx_net_buffer_list->net_buffer_list) = *nbl;
-      *nbl = tx_net_buffer_list->net_buffer_list;
-    }
-
-    FreeMemory(tx_net_buffer_list);
-  }
-}
-
 }  // namespace
 
 bool TxRingDma::Init(UINT32 id, UINT32 slice, UINT32 traffic_class,
@@ -260,8 +237,46 @@ void TxRingDma::Release() {
   TxRing::Release();
 }
 
+void TxRingDma::ReportNetBufferSentWithoutCompletion(
+    TxNetBufferList* tx_net_buffer_list, PNET_BUFFER_LIST* nbl) {
+  // If all net buffers are sent, prepend the net buffer list to a net buffer
+  // list chain so that these can all be completed in a single framework call.
+  // The relative ordering of the net buffer lists is unimportant.
+  //
+  // Each net buffer list chain is thread local, so mutating the chain is
+  // thread safe.
+  if (InterlockedIncrement(&tx_net_buffer_list->num_sent_net_buffer) ==
+      tx_net_buffer_list->num_net_buffer) {
+    NET_BUFFER_LIST_STATUS(tx_net_buffer_list->net_buffer_list) =
+        tx_net_buffer_list->status;
+    if (*nbl == nullptr) {
+      *nbl = tx_net_buffer_list->net_buffer_list;
+    } else {
+      NET_BUFFER_LIST_NEXT_NBL(tx_net_buffer_list->net_buffer_list) = *nbl;
+      *nbl = tx_net_buffer_list->net_buffer_list;
+    }
+
+    ReturnTxNetBufferList(tx_net_buffer_list);
+  }
+}
+
 void TxRingDma::SendBufferList(PNET_BUFFER_LIST net_buffer_list,
                                bool is_dpc_level) {
+  while (net_buffer_list) {
+    NET_BUFFER_LIST* next_net_buffer_list =
+        NET_BUFFER_LIST_NEXT_NBL(net_buffer_list);
+    NET_BUFFER_LIST_NEXT_NBL(net_buffer_list) = nullptr;
+
+    ProcessNetBufferList(net_buffer_list, is_dpc_level);
+
+    net_buffer_list = next_net_buffer_list;
+  }
+}
+
+void TxRingDma::ProcessNetBufferList(PNET_BUFFER_LIST net_buffer_list,
+                                     bool is_dpc_level) {
+  NT_ASSERT(NET_BUFFER_LIST_NEXT_NBL(net_buffer_list) == nullptr);
+
   TxNetBufferList* net_packet = GetTxNetBufferList(net_buffer_list);
   if (!net_packet) {
     CompleteNetBufferListWithStatus(net_buffer_list, NDIS_STATUS_RESOURCES,
@@ -752,7 +767,7 @@ void TxRingDma::ReportNetBufferSent(TxNetBufferList* tx_net_buffer_list,
       tx_net_buffer_list->num_net_buffer) {
     CompleteNetBufferListWithStatus(tx_net_buffer_list->net_buffer_list,
                                     tx_net_buffer_list->status, is_dpc_level);
-    FreeMemory(tx_net_buffer_list);
+    ReturnTxNetBufferList(tx_net_buffer_list);
   }
 }
 

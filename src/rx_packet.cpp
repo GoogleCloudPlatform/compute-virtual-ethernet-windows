@@ -151,21 +151,11 @@ void RxPacket::SetChecksumInfo() {
 }
 
 #if DBG
-UINT32 ConvertUINT32LittleEnd(UINT32 address) {
-  return address >> 24 & 0xff | address >> 8 & 0xff00 |
-       address << 8 & 0xff0000 | address << 24 & 0xff000000;
-}
-
-
-UINT16 ConvertUINT16LittleEnd(UINT16 address) {
-  return address >> 8 & 0xff | address << 8 & 0xff00;
-}
-
 
 UINT32 RxPacket::CalculateRss(UINT32 rss_hash_type) {
   bool input[96];
-  UINT32 source_address = ConvertUINT32LittleEnd(ipv4_header_->source_address);
-  UINT32 dest_address = ConvertUINT32LittleEnd(ipv4_header_->dest_address);
+  UINT32 source_address = RtlUlongByteSwap(ipv4_header_->source_address);
+  UINT32 dest_address = RtlUlongByteSwap(ipv4_header_->dest_address);
 
   for (int i = 0; i < 32; i++) {
     input[64 - i - 1] = dest_address & 0x01;
@@ -180,8 +170,8 @@ UINT32 RxPacket::CalculateRss(UINT32 rss_hash_type) {
 
   // need to extract port information with tcp and udp.
   if ((rss_hash_type & NDIS_HASH_TCP_IPV4) && is_tcp_) {
-    source_port = ConvertUINT16LittleEnd(tcp_header_->source_port);
-    dest_port = ConvertUINT16LittleEnd(tcp_header_->dest_port);
+    source_port = RtlUshortByteSwap(tcp_header_->source_port);
+    dest_port = RtlUshortByteSwap(tcp_header_->dest_port);
 
     for (int i = 0; i < 16; i++) {
       input[96 - i - 1] = dest_port & 0x01;
@@ -193,8 +183,8 @@ UINT32 RxPacket::CalculateRss(UINT32 rss_hash_type) {
   } else if ((rss_hash_type & NDIS_HASH_UDP_IPV4) && is_udp_) {
     UdpHeader* udp_header_ = reinterpret_cast<UdpHeader*>(
       OffsetToPointer(ipv4_header_, sizeof(IPv4Header)));
-    source_port = ConvertUINT16LittleEnd(udp_header_->source_port);
-    dest_port = ConvertUINT16LittleEnd(udp_header_->dest_port);
+    source_port = RtlUshortByteSwap(udp_header_->source_port);
+    dest_port = RtlUshortByteSwap(udp_header_->dest_port);
 
     for (int i = 0; i < 16; i++) {
       input[96 - i - 1] = dest_port & 0x01;

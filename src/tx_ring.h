@@ -108,7 +108,9 @@ __declspec(align(kCacheLineSize)) class TxRing : public RingBase {
             AdapterResources* adapter_resource, AdapterStatistics* statistics,
             const DeviceCounter* device_counters);
 
+  // Allocates from a lookaside list.
   TxNetBufferList* GetTxNetBufferList(PNET_BUFFER_LIST net_buffer_list);
+  void ReturnTxNetBufferList(TxNetBufferList* tx_nbl);
 
   void CompleteNetBufferListWithStatus(NET_BUFFER_LIST* net_buffer_list,
                                        NDIS_STATUS status, bool is_dpc_level);
@@ -144,6 +146,8 @@ __declspec(align(kCacheLineSize)) class TxRing : public RingBase {
   UINT descriptor_mask_;
 
   EthHeaderLength eth_header_len_;
+
+  NPAGED_LOOKASIDE_LIST tx_net_buffer_list_lookaside_list_;
 
   NDIS_SPIN_LOCK lock_;
 };
