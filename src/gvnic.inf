@@ -14,6 +14,7 @@ DriverPackageDisplayName = %gvnic.DeviceDesc%
 
 [Google.NT$ARCH$]
 %gvnic.DeviceDesc%    = gvnic.ndi, PCI\VEN_1AE0&DEV_0042&SUBSYS_00581AE0&REV_00
+%gvnic.DeviceDesc%    = gvnic.ndi, PCI\VEN_1AE0&DEV_0042
 
 [gvnic.ndi]
 Characteristics = 0x84          ; NCF_PHYSICAL  | NCF_HAS_UI

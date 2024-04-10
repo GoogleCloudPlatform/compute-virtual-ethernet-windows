@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Win7 Debug|Win32">
@@ -222,6 +222,7 @@
     <ClCompile Include="notify_manager.cpp" />
     <ClCompile Include="offload.cpp" />
     <ClCompile Include="oid.cpp" />
+    <ClCompile Include="os_information.cpp" />
     <ClCompile Include="adapter_resource.cpp" />
     <ClCompile Include="adapter_statistics.cpp" />
     <ClCompile Include="packet_assembler.cpp" />
@@ -403,6 +404,7 @@
     </ResourceCompile>
     <Link>
       <AdditionalDependencies>%(AdditionalDependencies);$(DDK_LIB_PATH)\ndis.lib</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);$(DDK_LIB_PATH)\ntoskrnl.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -433,6 +435,7 @@
     <ClInclude Include="miniport.h" />
     <ClInclude Include="netutils.h" />
     <ClInclude Include="oid.h" />
+    <ClInclude Include="os_information.h" />
     <ClInclude Include="adapter_resource.h" />
     <ClInclude Include="adapter_statistics.h" />
     <ClInclude Include="queue_page_list.h" />

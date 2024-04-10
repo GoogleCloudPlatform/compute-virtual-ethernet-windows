@@ -24,6 +24,47 @@ using std::endl;
 #include "command_handlers.h"  // NOLINT: include directory
 #include "registry_access.h"   // NOLINT: include directory
 
+class CFileVersion {
+ public:
+  CFileVersion(LPCTSTR Name) {
+    ULONG size = GetFileVersionInfoSize(Name, NULL);
+    if (!size) {
+      cout << TEXT("Can't get version info size for ") << Name;
+      return;
+    }
+    PVOID data = NULL;
+    data = malloc(size);
+    if (!data) {
+      cout << TEXT("Can't alloc file version memory of ") << size;
+      return;
+    }
+    if (!GetFileVersionInfo(Name, NULL, size, data)) {
+      cout << TEXT("Can't get file version, error ") << GetLastError();
+      free(data);
+      return;
+    }
+    VS_FIXEDFILEINFO* info;
+    UINT len;
+    if (!VerQueryValue(data, TEXT("\\"), (PVOID*)&info, &len)) {
+      cout << TEXT("Can't get fixed file version, error ") << GetLastError();
+      free(data);
+      return;
+    }
+    m_Ver[3] = LOWORD(info->dwFileVersionLS);
+    m_Ver[2] = HIWORD(info->dwFileVersionLS);
+    m_Ver[1] = LOWORD(info->dwFileVersionMS);
+    m_Ver[0] = HIWORD(info->dwFileVersionMS);
+    m_Valid = true;
+    cout << Name << ": version " << (ULONG)m_Ver[0] << "." << (ULONG)m_Ver[1]
+         << "." << (ULONG)m_Ver[2] << "." << (ULONG)m_Ver[3];
+  }
+  const USHORT* GetVersion() { return m_Valid ? m_Ver : NULL; }
+
+ private:
+  USHORT m_Ver[4] = {};
+  bool m_Valid = false;
+};
+
 constexpr GUID kGvnicGuid = {0xd5a8d0d,
                              0x2b48,
                              0x47b4,
@@ -91,6 +132,9 @@ DWORD GVNICHELPER_API RegisterGvnicNetshHelper() {
 DWORD WINAPI StartHelper(CONST GUID* guid_parent, DWORD version) {
   UNREFERENCED_PARAMETER(guid_parent);
   UNREFERENCED_PARAMETER(version);
+  CFileVersion ver(TEXT("netsh.exe"));
+  const USHORT* v = ver.GetVersion();
+  bool Is11_22H2 = v && v[0] == 10 && v[2] >= 22621;
 
   NS_CONTEXT_ATTRIBUTES attributes;
   ZeroMemory(&attributes, sizeof(attributes));
@@ -104,8 +148,11 @@ DWORD WINAPI StartHelper(CONST GUID* guid_parent, DWORD version) {
   attributes.pfnConnectFn = NULL;
   attributes.ulNumTopCmds = ARRAY_SIZE(top_commands);
   attributes.pTopCmds = (CMD_ENTRY(*)[]) & top_commands;
+  if (Is11_22H2) attributes.pTopCmds = (CMD_ENTRY(*)[])top_commands11;
   attributes.ulNumGroups = ARRAY_SIZE(command_groups);
-  attributes.pCmdGroups = (CMD_GROUP_ENTRY(*)[]) & command_groups;
+  attributes.pCmdGroups = (CMD_GROUP_ENTRY(*)[])command_groups;
+  if (Is11_22H2)
+    command_groups->pCmdGroup = (PCMD_ENTRY)&show_command_group11[0];
 
   return RegisterContext(&attributes);
 }

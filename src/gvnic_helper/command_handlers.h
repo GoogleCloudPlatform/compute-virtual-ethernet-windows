@@ -91,6 +91,11 @@ DWORD SetCmdHandler(LPCWSTR machine, PWCHAR* arguments, DWORD current_index,
 DWORD ResetCmdHandler(LPCWSTR machine, PWCHAR* arguments, DWORD current_index,
                       DWORD arg_count, DWORD flags, LPCVOID data, BOOL* done);
 
+// win32: sizeof(CMD_ENTRY)=24 bytes
+// x64:   sizeof(CMD_ENTRY)=40 bytes
+// fail in case of build with 22h2 WDK (22621)
+_STATIC_ASSERT(sizeof(CMD_ENTRY) == (4 * sizeof(PVOID) + 8));
+
 static CMD_ENTRY show_command_group[] = {
     CREATE_CMD_ENTRY_EX(DEVICE, ShowDeviceCmdHandler,
                         CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL),
@@ -109,6 +114,32 @@ static CMD_GROUP_ENTRY command_groups[] = {CREATE_CMD_GROUP_ENTRY_EX(
     SHOW, show_command_group, CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL)};
 
 static CMD_ENTRY top_commands[] = {
+    CREATE_CMD_ENTRY_EX(SET, SetCmdHandler, CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL),
+    CREATE_CMD_ENTRY_EX(RESTART, RestartCmdHandler,
+                        CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL),
+    CREATE_CMD_ENTRY_EX(RESET, ResetCmdHandler,
+                        CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL)};
+
+typedef struct {
+  CMD_ENTRY e;
+  PVOID p;
+} CMD_ENTRY11;
+
+static CMD_ENTRY11 show_command_group11[] = {
+    CREATE_CMD_ENTRY_EX(DEVICE, ShowDeviceCmdHandler,
+                        CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL),
+    CREATE_CMD_ENTRY_EX(DEVICES, ShowDevicesCmdHandler,
+                        /*CMD_FLAG_PRIVATE |*/ CMD_FLAG_LOCAL),
+    CREATE_CMD_ENTRY_EX(PARAMETERS, ShowParametersCmdHandler,
+                        CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL),
+    CREATE_CMD_ENTRY_EX(PARAMINFO, ShowParameterInfoCmdHandler,
+                        CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL),
+    CREATE_CMD_ENTRY_EX(SETTING, ShowSettingCmdHandler,
+                        CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL),
+    CREATE_CMD_ENTRY_EX(SETTINGS, ShowSettingsCmdHandler,
+                        CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL)};
+
+static CMD_ENTRY11 top_commands11[] = {
     CREATE_CMD_ENTRY_EX(SET, SetCmdHandler, CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL),
     CREATE_CMD_ENTRY_EX(RESTART, RestartCmdHandler,
                         CMD_FLAG_PRIVATE | CMD_FLAG_LOCAL),

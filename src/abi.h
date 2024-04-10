@@ -94,6 +94,29 @@ struct DescribeDeviceCommand {
   UINT32 available_length;
 };
 
+#define VERSION_STR_LEN 128
+
+enum DriverOSType : UINT8 {
+  //  kDriverOSLinux = 1,
+  kDriverOSWindows = 2,
+  //  kDriverOSFreeBSD = 3,
+  //  kDriverOSESXi = 4,
+  //  kDriverOSDPDK = 5,
+};
+
+struct DeviceInfo {
+  UINT8 os_type;
+  UINT8 driver_major;
+  UINT8 driver_minor;
+  UINT8 driver_sub;
+  UINT32 os_version_major;
+  UINT32 os_version_minor;
+  UINT32 os_version_sub;
+  UINT64 driver_capability_flags[4];
+  UINT8 os_version_str1[VERSION_STR_LEN];
+  UINT8 os_version_str2[VERSION_STR_LEN];
+};
+
 struct ConfigureDeviceResourcesCommand {
   UINT64 counter_array;
   UINT64 irq_db_addr_base;

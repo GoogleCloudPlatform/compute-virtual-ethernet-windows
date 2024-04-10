@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// clang-format off
 #include "device_fifo_queue.h"  // NOLINT: include directory
 
 #include <ndis.h>
 
-#include "abi.h"    // NOLINT: include directory
-#include "trace.h"  // NOLINT: include directory
-#include "utils.h"  // NOLINT: include directory
-
+#include "abi.h"                  // NOLINT: include directory
+#include "netutils.h"             // NOLINT: include directory
+#include "trace.h"                // NOLINT: include directory
+#include "utils.h"                // NOLINT: include directory
 #include "device_fifo_queue.tmh"  // NOLINT: trace message header
+// clang-format on
 
 namespace {
 // Query mdl length and address.
@@ -50,69 +52,18 @@ void DeviceFifoQueue::Init(PVOID* pages, UINT32 page_count) {
   page_count_ = page_count;
 }
 
-UINT32 DeviceFifoQueue::GetTailPaddings(UINT32 allocate_bytes) {
-  return (head_ + allocate_bytes < total_size_bytes_)
-             ? 0
-             : total_size_bytes_ - head_;
-}
-
-// clang-format off
-bool DeviceFifoQueue::CalculateNetBufferLengths(const NET_BUFFER& net_buffer,
-                                          void** header_addr,
-                                          UINT32* header_len,
-                                          UINT32* tail_padding,
-                                          UINT32* header_cache_line_padding,
-                                          MDL** data_mdl_addr,
-                                          UINT32* data_len,
-                                          UINT32* data_cache_line_padding) {
-  // clang-format on
-  UINT32 packet_len = NET_BUFFER_DATA_LENGTH(&net_buffer);
-
-  // Load detail header mdl length, offset, address
-  MDL* header_mdl = NET_BUFFER_CURRENT_MDL(&net_buffer);
-  UINT32 header_mdl_offset = NET_BUFFER_CURRENT_MDL_OFFSET(&net_buffer);
-  UINT32 header_mdl_len;
-  void* header_mdl_addr = nullptr;
-  if (!QueryMdl(header_mdl, &header_mdl_len, &header_mdl_addr)) {
-    return false;
-  }
-
-  // All data required for header segment.
-  *header_addr = OffsetToPointer(header_mdl_addr, header_mdl_offset);
-  *header_len = header_mdl_len - header_mdl_offset;
-  *tail_padding = GetTailPaddings(*header_len);
-  *header_cache_line_padding =
-      GetCacheAlignOffset(*header_len + *tail_padding, kCacheLineSize);
-
-  // All data required for data segment.
-  *data_mdl_addr = header_mdl->Next;
-  *data_len = packet_len - *header_len;
-  *data_cache_line_padding = GetCacheAlignOffset(*data_len, kCacheLineSize);
-
-  return true;
-}
-
-void DeviceFifoQueue::AdvanceHead(UINT32 offset) {
-  if (offset == 0) {
-    return;
-  }
-
-  NT_ASSERT(head_ + offset <= total_size_bytes_);
-  head_ += offset;
-  if (head_ == total_size_bytes_) {
-    head_ = 0;
-  }
-}
-
 _Requires_lock_held_(lock) PacketSegmentInfo DeviceFifoQueue::CopyNetBuffer(
-    NET_BUFFER* net_buffer, bool is_lso, NDIS_SPIN_LOCK& lock) {
+    NET_BUFFER* net_buffer,
+    NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO lso_info,
+    NDIS_SPIN_LOCK& lock) {
   UNREFERENCED_PARAMETER(lock);  // Used for SAL lock check only.
   PacketSegmentInfo packet_segment_info;
   UINT32 original_head = head_;  // Record the current head in case of rollback.
   UINT32 packet_allocated_size = 0;
 
-  if (is_lso) {
-    packet_allocated_size = CopyLsoPacket(net_buffer, &packet_segment_info);
+  if (lso_info.Value != nullptr) {
+    packet_allocated_size =
+        CopyLsoPacket(net_buffer, lso_info, &packet_segment_info);
   } else {
     packet_allocated_size = CopyNormalPacket(net_buffer, &packet_segment_info);
   }
@@ -242,20 +193,41 @@ int DeviceFifoQueue::CopyNormalPacket(NET_BUFFER* net_buffer,
 // +------------------+----+--------+--------+----+------------------+
 // | Data payload - 2 | CP | ...... | Header | CP | Data payload - 1 |
 // +------------------+----+--------+--------+----+------------------+
-int DeviceFifoQueue::CopyLsoPacket(NET_BUFFER* net_buffer,
-                                   PacketSegmentInfo* packet_segment_info) {
-  UINT32 header_len, tail_padding, header_cache_line_padding;
+int DeviceFifoQueue::CopyLsoPacket(
+    NET_BUFFER* net_buffer,
+    NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO lso_info,
+    PacketSegmentInfo* packet_segment_info) {
+  UINT32 tail_padding, header_cache_line_padding;
   UINT32 data_len, data_cache_line_padding;
-  void* header_addr;
-  MDL* data_mdl_addr;
 
-  // Calculate header and data segment addr/length.
-  if (!CalculateNetBufferLengths(*net_buffer, &header_addr, &header_len,
-                                 &tail_padding, &header_cache_line_padding,
-                                 &data_mdl_addr, &data_len,
-                                 &data_cache_line_padding)) {
-    return 0;
+  // Load header mdl length, offset, address
+  MDL* header_mdl = NET_BUFFER_CURRENT_MDL(net_buffer);
+  UINT32 header_mdl_offset = NET_BUFFER_CURRENT_MDL_OFFSET(net_buffer);
+  UINT32 header_mdl_len = 0;
+  void* header_mdl_addr = nullptr;
+  if (!QueryMdl(header_mdl, &header_mdl_len, &header_mdl_addr)) {
+    return false;
   }
+  void* header_addr = OffsetToPointer(header_mdl_addr, header_mdl_offset);
+
+  // Eth + IP + TCP header information should be provided in a single MDL
+  // with a virtually continous memory buffer.
+  // The payload may follow, or start in the next MDL.
+  UINT32 header_len = lso_info.LsoV2Transmit.TcpHeaderOffset;
+  TcpHeader* tcp_header =
+      reinterpret_cast<TcpHeader*>(OffsetToPointer(header_addr, header_len));
+  // Defined in TCP standard using 32-bit words
+  header_len += tcp_header->data_offset * 4;
+  tail_padding = GetTailPaddings(header_len);
+  header_cache_line_padding =
+      GetCacheAlignOffset(header_len + tail_padding, kCacheLineSize);
+
+  // Advance net buffer usespace to put data payload in context
+  NdisAdvanceNetBufferDataStart(net_buffer, header_len, false, nullptr);
+
+  // Load data mdl and length
+  data_len = NET_BUFFER_DATA_LENGTH(net_buffer);
+  data_cache_line_padding = GetCacheAlignOffset(data_len, kCacheLineSize);
 
   // Get overall packet allocated size inside FIFO queue.
   UINT32 packet_allocated_size = header_len + tail_padding +
@@ -267,6 +239,7 @@ int DeviceFifoQueue::CopyLsoPacket(NET_BUFFER* net_buffer,
     DEBUGP(GVNIC_WARNING,
            "[%s] WARNING: not enough space - available %#X - request %#llX",
            __FUNCTION__, available_bytes_, packet_allocated_size);
+    NdisRetreatNetBufferDataStart(net_buffer, header_len, 0, nullptr);
     return 0;
   }
 
@@ -274,41 +247,16 @@ int DeviceFifoQueue::CopyLsoPacket(NET_BUFFER* net_buffer,
   AdvanceHead(tail_padding);
 
   // Copy the packet header:
-  CopyHeaderSegment(header_addr, header_len,
-                    tail_padding + header_cache_line_padding,
-                    packet_segment_info);
+  packet_segment_info->packet_length = header_len;
+  packet_segment_info->packet_offset = head_;
+  packet_segment_info->allocated_length =
+      header_len + tail_padding + header_cache_line_padding;
+  CopyBytesToHead(header_addr, header_len);
 
   // Add header cache line padding.
   AdvanceHead(header_cache_line_padding);
 
   // Copy data packets and split it into two if needed.
-  if (!CopyDataSegment(data_mdl_addr, data_len, data_cache_line_padding,
-                       packet_segment_info)) {
-    return 0;
-  }
-
-  // Add data cache line padding.
-  AdvanceHead(data_cache_line_padding);
-  return packet_allocated_size;
-}
-
-void DeviceFifoQueue::CopyHeaderSegment(
-    void* header_addr, UINT32 header_len, UINT32 header_padding_len,
-    PacketSegmentInfo* packet_segment_info) {
-  packet_segment_info->packet_length = header_len;
-  packet_segment_info->packet_offset = head_;
-  packet_segment_info->allocated_length = header_len + header_padding_len;
-  CopyBytesToHead(header_addr, header_len);
-}
-
-bool DeviceFifoQueue::CopyDataSegment(MDL* data_mdl, UINT32 data_len,
-                                      UINT32 data_cacheline_padding,
-                                      PacketSegmentInfo* packet_segment_info) {
-  if (data_mdl == nullptr) {
-    packet_segment_info->data_segment_count = 0;
-    return true;
-  }
-
   UINT32 tail_space = total_size_bytes_ - head_;
   if (data_len <= tail_space) {
     // For CopyNetBuffer case 1 and 2.
@@ -316,7 +264,7 @@ bool DeviceFifoQueue::CopyDataSegment(MDL* data_mdl, UINT32 data_len,
     packet_segment_info->data_segment_info[0].offset = head_;
     packet_segment_info->data_segment_info[0].length = data_len;
     packet_segment_info->data_segment_info[0].allocated_length =
-        data_len + data_cacheline_padding;
+        data_len + data_cache_line_padding;
   } else {
     // For CopyNetBuffer case 3.
     packet_segment_info->data_segment_count = 2;
@@ -328,19 +276,21 @@ bool DeviceFifoQueue::CopyDataSegment(MDL* data_mdl, UINT32 data_len,
     packet_segment_info->data_segment_info[1].length = data_len - tail_space;
     packet_segment_info->data_segment_info[1].allocated_length =
         packet_segment_info->data_segment_info[1].length +
-        data_cacheline_padding;
+        data_cache_line_padding;
   }
 
   UINT32 byte_copied = 0;
-  for (MDL* current_mdl = data_mdl;
-       current_mdl != nullptr && byte_copied < data_len;
-       current_mdl = current_mdl->Next) {
+  while (NET_BUFFER_CURRENT_MDL(net_buffer) != nullptr &&
+         byte_copied < data_len) {
     void* mdl_addr = nullptr;
     UINT32 mdl_len;
-    if (!QueryMdl(current_mdl, &mdl_len, &mdl_addr)) {
-      return false;
+    if (!QueryMdl(NET_BUFFER_CURRENT_MDL(net_buffer), &mdl_len, &mdl_addr)) {
+      NdisRetreatNetBufferDataStart(net_buffer, header_len + byte_copied, 0,
+                                    nullptr);
+      return 0;
     }
-
+    mdl_addr =
+        OffsetToPointer(mdl_addr, NET_BUFFER_CURRENT_MDL_OFFSET(net_buffer));
     ULONG copy_len = min(mdl_len, data_len - byte_copied);
     if (copy_len + head_ <= total_size_bytes_) {
       CopyBytesToHead(mdl_addr, copy_len);
@@ -351,11 +301,16 @@ bool DeviceFifoQueue::CopyDataSegment(MDL* data_mdl, UINT32 data_len,
       CopyBytesToHead(OffsetToPointer(mdl_addr, tail_segment_size),
                       copy_len - tail_segment_size);
     }
+    NdisAdvanceNetBufferDataStart(net_buffer, copy_len, false, nullptr);
 
     byte_copied += copy_len;
   }
+  NT_ASSERT(NET_BUFFER_DATA_LENGTH(net_buffer) == 0);
+  NdisRetreatNetBufferDataStart(net_buffer, header_len + data_len, 0, nullptr);
 
-  return true;
+  // Add data cache line padding.
+  AdvanceHead(data_cache_line_padding);
+  return packet_allocated_size;
 }
 
 _Requires_lock_held_(lock) void DeviceFifoQueue::FreeAllocatedBuffer(

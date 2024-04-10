@@ -153,6 +153,10 @@ void NetBufferListContainer::AddNetBufferList(NET_BUFFER_LIST* net_buffer_list,
     ClearCoalescedUnit();
   }
 
+  // Given we are reusing NBLs, we are clearing coalescing information as it
+  // could be incorrect in case this NBL was last used by a coalesced packet.
+  NET_BUFFER_LIST_COALESCED_SEG_COUNT(net_buffer_list) = 0;
+
   if (is_coalescing_candidate) {
     // Init coalesced_unit
     coalesced_unit_.is_valid = true;

@@ -18,6 +18,7 @@
 #include "adapter_configuration.h"  // NOLINT: include directory
 #include "adapter_resource.h"       // NOLINT: include directory
 #include "adapter_statistics.h"     // NOLINT: include directory
+#include "gvnic_pci_device.tmh"     // NOLINT: trace message header
 #include "offload.h"                // NOLINT: include directory
 #include "ring_base.h"              // NOLINT: include directory
 #include "rx_ring.h"                // NOLINT: include directory
@@ -25,8 +26,6 @@
 #include "trace.h"                  // NOLINT: include directory
 #include "tx_ring.h"                // NOLINT: include directory
 #include "utils.h"                  // NOLINT: include directory
-
-#include "gvnic_pci_device.tmh"  // NOLINT: trace message header
 
 namespace {
 constexpr UINT kMaxTxTrafficClass = 8;

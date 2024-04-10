@@ -46,6 +46,7 @@ inline void GvnicFreeMemory(AdapterContext* context) {
   context->device.Release();
   context->statistics.Release();
   context->resources.Release();
+  context->configuration.Release();
 
   NdisFreeMemory(context, 0, 0);
 }

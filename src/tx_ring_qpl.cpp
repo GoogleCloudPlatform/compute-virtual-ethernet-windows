@@ -228,7 +228,8 @@ _Requires_lock_held_(lock_) NDIS_STATUS TxRingQpl::SendNetPackets(
 
     // Copy the package into device queue.
     PacketSegmentInfo packet_segment_info = device_queue_.CopyNetBuffer(
-        current_net_buffer_to_send_, tx_net_buffer.is_lso(), lock_);
+        current_net_buffer_to_send_, current_net_buffer_list_to_send_->lso_info,
+        lock_);
     if (packet_segment_info.allocated_length == 0) {
       // copy failed due to system resources are low or exhausted.
       // Will retry on next SendNetPackets.

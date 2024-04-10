@@ -138,6 +138,11 @@ void AdapterConfiguration::Initialize(NDIS_HANDLE miniport_handle) {
   PAGED_CODE();
   DEBUGP(GVNIC_VERBOSE, "---> AdapterConfiguration::Initialize\n");
 
+  NDIS_STATUS status = os_info_.Initialize(miniport_handle);
+  if (status != NDIS_STATUS_SUCCESS) {
+    DEBUGP(GVNIC_WARNING, "[%s] Unable to retrieve OS Version Info.",
+           __FUNCTION__);
+  }
   LoadDefaultValue();
 
   NDIS_HANDLE configuration_handle = OpenNICConfiguration(miniport_handle);
@@ -159,7 +164,6 @@ void AdapterConfiguration::Initialize(NDIS_HANDLE miniport_handle) {
     // Read Mac address.
     PVOID network_addr;
     UINT length = 0;
-    NDIS_STATUS status;
     NdisReadNetworkAddress(&status, &network_addr, &length,
                            configuration_handle);
     if (status == NDIS_STATUS_SUCCESS && length == kEthAddrLen) {

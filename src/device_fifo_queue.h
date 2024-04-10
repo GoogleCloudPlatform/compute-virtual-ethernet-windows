@@ -19,8 +19,6 @@
 
 #include <ndis.h>
 
-#include "queue_page_list.h"  // NOLINT: include directory
-
 // Used to pass the fragmentation info between tx_ring and fifo_queue.
 // Please see CopyNetBuffer for details.
 struct PacketSegmentInfo {
@@ -83,7 +81,9 @@ class DeviceFifoQueue final {
   // Method is not concurrent safe and caller tx_ring need to hold appropriate
   // lock.
   _Requires_lock_held_(lock) PacketSegmentInfo
-      CopyNetBuffer(NET_BUFFER* net_buffer, bool is_lso, NDIS_SPIN_LOCK& lock);
+      CopyNetBuffer(NET_BUFFER* tx_net_buffer,
+                    NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO lso_info,
+                    NDIS_SPIN_LOCK& lock);
 
   // Free used space allocated by CopyNetBuffer (size from allocated_length
   // inside PacketSegmentInfo). It marks the bytes allocated
@@ -92,39 +92,6 @@ class DeviceFifoQueue final {
                                                       NDIS_SPIN_LOCK& lock);
 
  private:
-  // Copy raw memory bits into where the head_ points to and also move the
-  // head_ to next copy position.
-  void CopyBytesToHead(void* source, UINT32 len);
-
-  // Return padding required if the allocated_byte cannot fit in the available
-  // space by the end of the queue. Return 0 otherwise.
-  UINT32 GetTailPaddings(UINT32 allocate_bytes);
-
-  // Copy header MDL into queue and update segment info.
-  void CopyHeaderSegment(void* header_addr, UINT32 header_len,
-                         UINT32 header_padding_len,
-                         PacketSegmentInfo* packet_segment_info);
-
-  // Copy Data MDLs into queue and update segment info for where and how the
-  // overall packet is stored.
-  // Return false if copy failed.
-  bool CopyDataSegment(MDL* data_mdl, UINT32 data_len,
-                       UINT32 data_cacheline_padding,
-                       PacketSegmentInfo* packet_segment_info);
-
-  // Calculate header, data segment address/length/padding based on net_buffer.
-  // Return false if map net_buffer failed.
-  // clang-format off
-  bool CalculateNetBufferLengths(const NET_BUFFER& net_buffer,
-                                 void** header_addr,
-                                 UINT32* header_len,
-                                 UINT32* tail_padding,
-                                 UINT32* header_cache_line_padding,
-                                 MDL** data_mdl_addr,
-                                 UINT32* data_len,
-                                 UINT32* data_cache_line_padding);
-  // clang-format on
-
   // Copy normal net packets into queue. The whole packet will always get
   // copied into a continuous block space and never gets split.
   // Return the total number of bytes used. Return 0 if failed.
@@ -134,11 +101,34 @@ class DeviceFifoQueue final {
   // Copy LSO packets into queue. The packet will get copied up to 3 segments.
   // Return the total number of bytes used. Return 0 if failed.
   int CopyLsoPacket(NET_BUFFER* net_buffer,
+                    NDIS_TCP_LARGE_SEND_OFFLOAD_NET_BUFFER_LIST_INFO lso_info,
                     PacketSegmentInfo* packet_segment_info);
+
+  // Copy raw memory bits into where the head_ points to and also move the
+  // head_ to next copy position.
+  void CopyBytesToHead(void* source, UINT32 len);
 
   // Move head_ by offset. Go back to 0 if it reaches the end exactly.
   // offset should never go beyond the end and will cause crash.
-  void AdvanceHead(UINT32 offset);
+  void AdvanceHead(UINT32 offset) {
+    if (offset == 0) {
+      return;
+    }
+
+    NT_ASSERT(head_ + offset <= total_size_bytes_);
+    head_ += offset;
+    if (head_ == total_size_bytes_) {
+      head_ = 0;
+    }
+  }
+
+  // Return padding required if the allocated_byte cannot fit in the available
+  // space by the end of the queue. Return 0 otherwise.
+  UINT32 GetTailPaddings(UINT32 allocate_bytes) {
+    return (head_ + allocate_bytes < total_size_bytes_)
+               ? 0
+               : total_size_bytes_ - head_;
+  }
 
   PVOID* pages_;
   UINT32 page_count_;
