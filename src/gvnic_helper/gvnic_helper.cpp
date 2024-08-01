@@ -55,8 +55,6 @@ class CFileVersion {
     m_Ver[1] = LOWORD(info->dwFileVersionMS);
     m_Ver[0] = HIWORD(info->dwFileVersionMS);
     m_Valid = true;
-    cout << Name << ": version " << (ULONG)m_Ver[0] << "." << (ULONG)m_Ver[1]
-         << "." << (ULONG)m_Ver[2] << "." << (ULONG)m_Ver[3];
   }
   const USHORT* GetVersion() { return m_Valid ? m_Ver : NULL; }
 
