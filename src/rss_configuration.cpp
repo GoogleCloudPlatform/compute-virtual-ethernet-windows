@@ -21,16 +21,21 @@
 
 #include "rss_configuration.tmh"  // NOLINT: trace message header
 
+// NOLINTBEGIN(misc-include-cleaner)
 namespace {
 bool IsPowerOfTwo(UINT32 num) { return (num != 0) && ((num & (num - 1)) == 0); }
 
 bool IsValidHashFunc(UINT8 func) { return func == NdisHashFunctionToeplitz; }
 
 bool IsValidHashType(UINT32 type) {
-  constexpr UINT32 valid_hash_types =
-      NDIS_HASH_IPV4 | NDIS_HASH_TCP_IPV4 | NDIS_HASH_UDP_IPV4 |
-      NDIS_HASH_IPV6 | NDIS_HASH_TCP_IPV6 | NDIS_HASH_UDP_IPV6 |
-      NDIS_HASH_IPV6_EX | NDIS_HASH_TCP_IPV6_EX | NDIS_HASH_UDP_IPV6_EX;
+  UINT32 valid_hash_types = NDIS_HASH_IPV4 | NDIS_HASH_TCP_IPV4 |
+                            NDIS_HASH_IPV6 | NDIS_HASH_TCP_IPV6 |
+                            NDIS_HASH_IPV6_EX | NDIS_HASH_TCP_IPV6_EX;
+
+#if (NDIS_SUPPORT_NDIS680)
+  valid_hash_types |=
+      NDIS_HASH_UDP_IPV4 | NDIS_HASH_UDP_IPV6 | NDIS_HASH_UDP_IPV6_EX;
+#endif
 
   return (type & valid_hash_types) && !(type & ~valid_hash_types);
 }
@@ -77,8 +82,13 @@ RSSConfiguration::GetCapabilities(UINT32 num_msi_vectors,
       NDIS_RSS_CAPS_CLASSIFICATION_AT_ISR |
       NDIS_RSS_CAPS_CLASSIFICATION_AT_DPC | NDIS_RSS_CAPS_HASH_TYPE_TCP_IPV4 |
       NDIS_RSS_CAPS_HASH_TYPE_TCP_IPV6 | NDIS_RSS_CAPS_HASH_TYPE_TCP_IPV6_EX |
-      NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV4 | NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV6 |
-      NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV6_EX | NdisHashFunctionToeplitz;
+      NdisHashFunctionToeplitz;
+
+#if (NDIS_SUPPORT_NDIS680)
+  capabilities.CapabilitiesFlags |= NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV4 |
+                                    NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV6 |
+                                    NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV6_EX;
+#endif
 
   capabilities.NumberOfInterruptMessages = num_msi_vectors;
   capabilities.NumberOfReceiveQueues = num_rx_slices;
@@ -273,3 +283,4 @@ void RSSConfiguration::DumpSettings() {
            indirection_table_[i].Number);
   }
 }
+// NOLINTEND(misc-include-cleaner)

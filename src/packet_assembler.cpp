@@ -23,6 +23,7 @@
 
 #include "packet_assembler.tmh"  // NOLINT: trace message header
 
+// NOLINTBEGIN(misc-include-cleaner)
 namespace {
 // Internet Header Length (IHL) value for ip header without options.
 // It is the number of 32-bit works. so 5 means 20 bytes.
@@ -345,6 +346,7 @@ NET_BUFFER_LIST* PacketAssembler::AllocateNewNBL(
                                       rx_packet->rss_hash_func());
     UINT32 rss_hash_type = rx_packet->rss_hash_type();
 
+#if NDIS_SUPPORT_NDIS680
     if (rx_packet->is_tcp() && (rss_hash_type & NDIS_HASH_TCP_IPV4)) {
       NET_BUFFER_LIST_SET_HASH_TYPE(net_buffer_list, NDIS_HASH_TCP_IPV4);
     } else if (rx_packet->is_udp() && (rss_hash_type & NDIS_HASH_UDP_IPV4)) {
@@ -352,6 +354,13 @@ NET_BUFFER_LIST* PacketAssembler::AllocateNewNBL(
     } else {
       NET_BUFFER_LIST_SET_HASH_TYPE(net_buffer_list, NDIS_HASH_IPV4);
     }
+#else
+    if (rx_packet->is_tcp() && (rss_hash_type & NDIS_HASH_TCP_IPV4)) {
+      NET_BUFFER_LIST_SET_HASH_TYPE(net_buffer_list, NDIS_HASH_TCP_IPV4);
+    } else {
+      NET_BUFFER_LIST_SET_HASH_TYPE(net_buffer_list, NDIS_HASH_IPV4);
+    }
+#endif
   }
 
   // Add it to the container.
@@ -378,3 +387,5 @@ void PacketAssembler::MergePackets(const RxPacket& rx_packet,
   // TODO: handle TCP timestamp option.
 }
 #endif  // SUPPORT_RSC
+
+// NOLINTEND(misc-include-cleaner)
